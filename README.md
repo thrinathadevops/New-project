@@ -13,6 +13,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - BUY/HOLD/SELL signal generation using EMA9/EMA21 crossover, recent swing-high breakout confirmation, VWAP, RSI, volume, and ATR context.
 - Price-action confirmation for trend structure, support/resistance, candle psychology, volume confirmation, breakout/retest state, and stop zone.
 - Smart-money context for fair value gaps, liquidity sweeps, OHLCV-based order-flow proxy, VWAP relation, and volume profile POC/value area.
+- Weekday situational analysis for Friday-low Monday revisits and Wednesday-low Thursday revisits.
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
 - Backtesting with brokerage, GST, STT, and slippage assumptions.
 - Paper broker and trade journal building blocks.
@@ -87,6 +88,20 @@ Order flow proxy: estimates buyer/seller pressure from candle body location and 
 VWAP: above VWAP supports long bias; below VWAP adds a warning.
 Volume profile: estimates point of control and value area from recent close/volume distribution.
 ```
+
+## Weekday Situational Analysis
+
+The analyzer flags two low-revisit conditions:
+
+```text
+Friday rule:
+If Friday high is lower than Thursday high, watch Friday low as a possible Monday revisit level.
+
+Wednesday rule:
+If Wednesday high is lower than Monday high, watch Wednesday low as a possible Thursday revisit level.
+```
+
+These are shown as situational levels, not automatic trades. Use them as context with EMA/FVG/VWAP/price-action confirmation.
 
 Screener does not provide a public API. The app supports automatic fetching through a saved screen export URL. Set one of these:
 

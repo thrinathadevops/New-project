@@ -15,5 +15,6 @@ __all__ = [
     "screener_provider",
     "signals",
     "smart_money",
+    "situational",
     "strategy",
 ]
