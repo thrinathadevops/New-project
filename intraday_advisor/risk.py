@@ -104,7 +104,7 @@ def build_trade_plan_from_stop(
         risk_amount=round(risk_amount, 2),
         reward_amount=round(reward_amount, 2),
         risk_per_share=round(risk_per_share, 2),
-        notes=f"Swing/ATR stop, target {config.reward_risk_ratio}R; exit if EMA9 crosses below EMA21",
+        notes=f"Watchlist plan: swing/ATR stop, target {config.reward_risk_ratio}R; invalidate if EMA9 crosses below EMA21",
     )
 
 

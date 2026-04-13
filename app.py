@@ -2,7 +2,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from intraday_advisor.angel_one import AngelOneClient
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import fetch_yahoo_ohlcv, generate_sample_ohlcv, load_watchlist
 from intraday_advisor.fundamentals import merge_fundamentals
@@ -16,7 +15,7 @@ from intraday_advisor.strategy import apply_ema_swing_breakout_strategy, ema_swi
 
 st.set_page_config(page_title="Intraday Trade Advisor", layout="wide")
 st.title("Intraday Trade Advisor")
-st.caption("Paper-trading analysis only. It estimates risk and reward; it does not guarantee profit or place live orders.")
+st.caption("Decision-support analysis only. It ranks watchlist candidates and estimates risk/reward; it does not place live orders.")
 
 with st.sidebar:
     st.header("Settings")
@@ -132,31 +131,11 @@ if not fundamental_candidates.empty and all(column in ranked.columns for column 
     st.dataframe(ranked[fundamental_columns].round(2), use_container_width=True)
 
 plans = [row["Plan"] for row in results if row["Plan"] is not None]
-st.subheader("Trade Plans")
+st.subheader("Watchlist Trade Plans")
 if plans:
     plans_df = pd.DataFrame([plan.__dict__ for plan in plans])
     st.dataframe(plans_df, use_container_width=True)
-
-    st.subheader("Angel One Live Order")
-    st.warning("Live orders are blocked unless ENABLE_LIVE_TRADING=YES and you type the exact confirmation. Use paper trading first.")
-    selected_plan_ticker = st.selectbox("Plan to execute", plans_df["ticker"].tolist())
-    selected_plan = next(plan for plan in plans if plan.ticker == selected_plan_ticker)
-    symbol_token = st.text_input("Angel One symbol token", help="Use the broker token for the NSE equity symbol. The backend also has search_symbol_token().")
-    confirmation = st.text_input("Type BUY LIVE to submit", value="")
-    if st.button("Submit Angel One live intraday order"):
-        if confirmation != "BUY LIVE":
-            st.error("Order blocked: confirmation text did not match.")
-        elif selected_plan.direction != "BUY":
-            st.error("Order blocked: this button only allows BUY plans.")
-        elif not symbol_token.strip():
-            st.error("Order blocked: symbol token is required.")
-        else:
-            try:
-                response = AngelOneClient().place_intraday_order(selected_plan, symbol_token=symbol_token.strip(), live_confirmed=True)
-                st.success("Angel One order submitted.")
-                st.json(response)
-            except Exception as exc:
-                st.error(f"Angel One order blocked or failed: {exc}")
+    st.info("Use these as watchlist plans only. Confirm manually in your broker app before taking any trade.")
 else:
     st.info("No fresh BUY/SELL setup on the latest candle. Keep monitoring or loosen filters after testing.")
 

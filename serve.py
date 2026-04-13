@@ -125,7 +125,7 @@ def render_page(query: dict[str, list[str]]) -> str:
 <body>
   <header>
     <h1>Intraday Trade Advisor</h1>
-    <p class="notice">Paper-trading analysis only. Signals estimate risk and reward; they do not guarantee profit or place live orders. Page refreshes every 60 seconds.</p>
+    <p class="notice">Decision-support analysis only. Signals estimate risk and reward; they do not guarantee profit or place live orders. Page refreshes every 60 seconds.</p>
   </header>
   <main>
     <form method="get">
@@ -145,7 +145,7 @@ def render_page(query: dict[str, list[str]]) -> str:
       {table_html(ranked[[column for column in ["Ticker", "MarketCapCr", "ROE", "ROCE", "DebtToEquity", "SalesGrowth", "PromoterHolding", "ProfitGrowth", "OPM", "EPS"] if column in ranked.columns]])}
     </section>
     <section>
-      <h2>Trade Plans</h2>
+      <h2>Watchlist Trade Plans</h2>
       {table_html(plan_df) if not plan_df.empty else "<p>No fresh BUY/SELL setup on the latest candle.</p>"}
     </section>
   </main>

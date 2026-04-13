@@ -1,6 +1,6 @@
 # Intraday Trade Advisor
 
-Paper-trading prototype for intraday market pre-analysis, signal monitoring, risk sizing, and backtesting.
+Decision-support prototype for intraday market pre-analysis, best-stock shortlisting, signal monitoring, risk sizing, and backtesting.
 
 This app does not guarantee profit and does not place live broker orders. Treat the output as research support. Validate every strategy with out-of-sample data, realistic costs, and paper trading before risking money.
 
@@ -15,7 +15,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
 - Backtesting with brokerage, GST, STT, and slippage assumptions.
 - Paper broker and trade journal building blocks.
-- Optional Angel One SmartAPI adapter for historical candles and guarded live intraday order placement.
+- Optional Angel One SmartAPI adapter for historical candles and symbol-token lookup. The dashboard does not place live orders.
 - Streamlit dashboard and unit tests.
 
 ## Run locally without extra UI packages
@@ -59,7 +59,7 @@ The analyzer then keeps only those stocks and applies the technical condition:
 Close > EMA200
 ```
 
-After that, it waits for the EMA9/EMA21 crossover and recent swing-high breakout entry.
+After that, it waits for the EMA9/EMA21 crossover and recent swing-high breakout setup. The app shows the best watchlist candidates with risk/reward guidance; it does not automatically buy or sell.
 
 ## Price-action confirmation
 
@@ -115,7 +115,7 @@ Install broker dependencies:
 python -m pip install smartapi-python pyotp logzero websocket-client
 ```
 
-Live buying is blocked unless `ENABLE_LIVE_TRADING=YES` and the code passes `live_confirmed=True` to the Angel One adapter. In the Streamlit UI you must also type `BUY LIVE`. Keep it on `NO` while testing and paper-trading.
+The dashboard does not place live orders. Keep `ENABLE_LIVE_TRADING=NO` unless you are separately testing broker integration code outside the analyzer UI.
 
 Angel One order and candle APIs require a `symboltoken`. The adapter includes `search_symbol_token("RELIANCE")`, which uses SmartAPI symbol search and prefers exact `-EQ` NSE matches.
 
