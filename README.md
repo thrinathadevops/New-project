@@ -21,6 +21,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - Optional Angel One SmartAPI adapter for historical candles and symbol-token lookup. The dashboard does not place live orders.
 - Streamlit dashboard and unit tests.
 - SQLite cache for OHLCV, fundamentals, analysis results, and journal-ready records.
+- Explainability table for each theory plus per-stock `SuggestedAction` and `ActionReason`.
 
 ## Run locally without extra UI packages
 
@@ -144,6 +145,17 @@ Entry confirmation: look for a long-wick rejection candle at the box edge.
 ```
 
 In code this appears as `BoxHigh`, `BoxLow`, `BoxMiddle`, `BoxZone`, `BoxWickSignal`, and `BoxBias`.
+
+## How To Select A Stock
+
+The dashboard includes an info table explaining every theory and a per-stock summary:
+
+```text
+SuggestedAction = BUY WATCH, WAIT / AVOID, or HOLD
+ActionReason = the combined reason from EMA, EMA200, box theory, VWAP, order flow, and volume
+```
+
+Use this as the final filter. If a stock has many interesting tricks but `SuggestedAction` says `WAIT / AVOID`, the app is telling you the combined evidence is not clean enough yet.
 
 Screener does not provide a public API. The app supports automatic fetching through a saved screen export URL. Set one of these:
 

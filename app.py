@@ -6,6 +6,7 @@ from intraday_advisor.box_theory import analyze_box_theory
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import fetch_yahoo_ohlcv, generate_sample_ohlcv, load_watchlist
 from intraday_advisor.database import DEFAULT_DB_PATH, load_fundamentals, store_analysis_results, store_fundamentals, store_ohlcv
+from intraday_advisor.explainability import decision_guide, theory_info_rows
 from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.price_action import analyze_price_action
@@ -110,6 +111,9 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
         "Warnings": "; ".join(decision.warnings),
         "Plan": plan,
     }
+    suggested_action, action_reason = decision_guide(summary)
+    summary["SuggestedAction"] = suggested_action
+    summary["ActionReason"] = action_reason
     return df, summary
 
 
@@ -153,10 +157,12 @@ if use_db_cache and not ranked.empty:
     st.caption(f"Cached latest analysis in {DEFAULT_DB_PATH}.")
 
 st.subheader("Ranked Watchlist")
+with st.expander("Info: how to understand each theory"):
+    st.dataframe(pd.DataFrame(theory_info_rows()), use_container_width=True)
 if not fundamental_candidates.empty:
     st.caption("Only stocks passing your Screener fundamentals and trading above EMA200 are considered.")
 st.dataframe(
-    ranked[["Ticker", "Signal", "Score", "Close", "EMA200", "AboveEMA200", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]].round(3),
+    ranked[["Ticker", "SuggestedAction", "ActionReason", "Signal", "Score", "Close", "EMA200", "AboveEMA200", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]].round(3),
     use_container_width=True,
 )
 st.dataframe(

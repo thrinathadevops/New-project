@@ -10,6 +10,7 @@ from intraday_advisor.box_theory import analyze_box_theory
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import generate_sample_ohlcv, load_watchlist
 from intraday_advisor.database import DEFAULT_DB_PATH, load_fundamentals, store_analysis_results, store_fundamentals, store_ohlcv
+from intraday_advisor.explainability import decision_guide, theory_info_rows
 from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.price_action import analyze_price_action
@@ -88,6 +89,9 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
         "FloatPct": 35.0,
         "Sector": "Demo",
     }
+    suggested_action, action_reason = decision_guide(row)
+    row["SuggestedAction"] = suggested_action
+    row["ActionReason"] = action_reason
     return row, plan
 
 
@@ -130,6 +134,7 @@ def render_page(query: dict[str, list[str]]) -> str:
     store_analysis_results(ranked, DEFAULT_DB_PATH)
     plan_df = pd.DataFrame(plans)
     note = f"{screener_note} Only Screener candidates above EMA200 are considered when the provider is configured."
+    info_df = pd.DataFrame(theory_info_rows())
 
     return f"""<!doctype html>
 <html lang="en">
@@ -168,8 +173,12 @@ def render_page(query: dict[str, list[str]]) -> str:
     </form>
     <p class="notice">{html.escape(note)}</p>
     <section>
+      <h2>Theory Info</h2>
+      {table_html(info_df)}
+    </section>
+    <section>
       <h2>Ranked Watchlist</h2>
-      {table_html(ranked[["Ticker", "Signal", "Confidence", "Setup", "Score", "Close", "EMA9", "EMA21", "EMA200", "AboveEMA200", "BreakoutLevel", "SwingHigh", "SwingLow", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]])}
+      {table_html(ranked[["Ticker", "SuggestedAction", "ActionReason", "Signal", "Confidence", "Setup", "Score", "Close", "EMA9", "EMA21", "EMA200", "AboveEMA200", "BreakoutLevel", "SwingHigh", "SwingLow", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]])}
       <h3>Reasons</h3>
       {table_html(ranked[["Ticker", "TrendStructure", "CandlePattern", "CandleBias", "VolumeConfirmation", "BreakoutState", "Support", "Resistance"]])}
       {table_html(ranked[["Ticker", "FVG", "FVGLower", "FVGUpper", "FVGMitigated", "LiquiditySweep", "OrderFlow", "CumulativeDelta", "VolumePOC", "ValueAreaLow", "ValueAreaHigh", "VWAPRelation"]])}
