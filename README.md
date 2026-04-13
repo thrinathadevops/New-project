@@ -12,6 +12,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - Scoring and ranking for watchlists.
 - BUY/HOLD/SELL signal generation using EMA9/EMA21 crossover, recent swing-high breakout confirmation, VWAP, RSI, volume, and ATR context.
 - Price-action confirmation for trend structure, support/resistance, candle psychology, volume confirmation, breakout/retest state, and stop zone.
+- Smart-money context for fair value gaps, liquidity sweeps, OHLCV-based order-flow proxy, VWAP relation, and volume profile POC/value area.
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
 - Backtesting with brokerage, GST, STT, and slippage assumptions.
 - Paper broker and trade journal building blocks.
@@ -72,6 +73,19 @@ Candlestick psychology: bullish/bearish engulfing, pin bars, doji, rejection wic
 Volume confirmation: breakout with rising volume is stronger; breakout with weak volume is warned as risky.
 Breakout strategy: watch break and retest behavior around resistance/support.
 Risk management: position size comes from capital risk, stop distance, and planned reward/risk.
+```
+
+## Smart-money context
+
+The analyzer adds these confirmations to the EMA setup:
+
+```text
+Fair value gap: bullish FVG means the current low is above the high from two candles back; bearish FVG is the inverse.
+FVG + EMA pairing: bullish setups are stronger when price is above EMA9/EMA21 and aligned with a bullish FVG.
+Liquidity sweep: checks whether price swept recent highs/lows and rejected or broke through.
+Order flow proxy: estimates buyer/seller pressure from candle body location and volume. True order flow needs broker tick/depth data.
+VWAP: above VWAP supports long bias; below VWAP adds a warning.
+Volume profile: estimates point of control and value area from recent close/volume distribution.
 ```
 
 Screener does not provide a public API. The app supports automatic fetching through a saved screen export URL. Set one of these:

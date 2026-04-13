@@ -10,6 +10,7 @@ from intraday_advisor.price_action import analyze_price_action
 from intraday_advisor.risk import build_trade_plan_from_stop
 from intraday_advisor.screening import apply_screen, score_stocks
 from intraday_advisor.screener_provider import fetch_fundamental_candidates
+from intraday_advisor.smart_money import analyze_smart_money
 from intraday_advisor.strategy import apply_ema_swing_breakout_strategy, ema_swing_breakout_decision
 
 
@@ -37,6 +38,7 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
     last = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"]).iloc[-1]
     decision = ema_swing_breakout_decision(symbol, df)
     price_action = analyze_price_action(df)
+    smart_money = analyze_smart_money(df)
     plan = None
     if decision.signal == "BUY":
         initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
@@ -78,6 +80,17 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
         "CandleBias": price_action.candle_bias,
         "VolumeConfirmation": price_action.volume_confirmation,
         "BreakoutState": price_action.breakout_state,
+        "FVG": smart_money.fvg_direction,
+        "FVGLower": smart_money.fvg_lower,
+        "FVGUpper": smart_money.fvg_upper,
+        "FVGMitigated": smart_money.fvg_mitigated,
+        "LiquiditySweep": smart_money.liquidity_sweep,
+        "OrderFlow": smart_money.order_flow,
+        "CumulativeDelta": smart_money.cumulative_delta,
+        "VolumePOC": smart_money.volume_poc,
+        "ValueAreaLow": smart_money.value_area_low,
+        "ValueAreaHigh": smart_money.value_area_high,
+        "VWAPRelation": smart_money.vwap_relation,
         "Reasons": "; ".join(decision.reasons),
         "Warnings": "; ".join(decision.warnings),
         "Plan": plan,
@@ -123,6 +136,10 @@ st.dataframe(
 )
 st.dataframe(
     ranked[["Ticker", "Setup", "Confidence", "TrendStructure", "CandlePattern", "VolumeConfirmation", "BreakoutState", "Support", "Resistance", "EMA9", "EMA21", "BreakoutLevel", "SwingHigh", "SwingLow", "Reasons", "Warnings"]],
+    use_container_width=True,
+)
+st.dataframe(
+    ranked[["Ticker", "FVG", "FVGLower", "FVGUpper", "FVGMitigated", "LiquiditySweep", "OrderFlow", "CumulativeDelta", "VolumePOC", "ValueAreaLow", "ValueAreaHigh", "VWAPRelation"]],
     use_container_width=True,
 )
 fundamental_columns = ["Ticker", "MarketCapCr", "ROE", "ROCE", "DebtToEquity", "SalesGrowth", "PromoterHolding", "ProfitGrowth", "OPM", "EPS"]

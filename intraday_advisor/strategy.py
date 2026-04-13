@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from intraday_advisor.price_action import analyze_price_action
+from intraday_advisor.smart_money import analyze_smart_money
 
 
 @dataclass(frozen=True)
@@ -72,8 +73,9 @@ def ema_swing_breakout_decision(ticker: str, df: pd.DataFrame) -> AnalysisDecisi
 
     last = usable.iloc[-1]
     price_action = analyze_price_action(strategy)
+    smart_money = analyze_smart_money(strategy)
     reasons: list[str] = []
-    warnings: list[str] = list(price_action.warnings)
+    warnings: list[str] = list(price_action.warnings) + list(smart_money.warnings)
 
     if last["EMA9"] > last["EMA21"]:
         reasons.append("EMA9 is above EMA21")
@@ -84,6 +86,7 @@ def ema_swing_breakout_decision(ticker: str, df: pd.DataFrame) -> AnalysisDecisi
         reasons.append(f"breakout level is {float(last['EMABreakoutLevel']):.2f}")
 
     reasons.extend(price_action.reasons)
+    reasons.extend(smart_money.reasons)
 
     if last["Close"] > last["VWAP"]:
         reasons.append("price is above VWAP")
@@ -104,8 +107,14 @@ def ema_swing_breakout_decision(ticker: str, df: pd.DataFrame) -> AnalysisDecisi
 
     if last["Signal"] == "BUY":
         price_action_ok = price_action.trend == "uptrend" and price_action.volume_confirmation == "bullish confirmation"
-        confidence = 88 if price_action_ok else 72
-        return AnalysisDecision(ticker, "BUY", max(55, confidence - len(warnings) * 5), "EMA9/EMA21 swing-high breakout + price action", reasons, warnings)
+        smart_money_ok = (
+            smart_money.fvg_direction in {"bullish", "none"}
+            and smart_money.vwap_relation == "above VWAP"
+            and smart_money.order_flow != "seller-dominant order flow"
+            and smart_money.liquidity_sweep != "bearish liquidity sweep"
+        )
+        confidence = 92 if price_action_ok and smart_money_ok else 76 if smart_money_ok else 68
+        return AnalysisDecision(ticker, "BUY", max(50, confidence - len(warnings) * 4), "EMA9/EMA21 swing-high breakout + FVG/VWAP/price action", reasons, warnings)
     if last["Signal"] == "SELL":
         return AnalysisDecision(ticker, "SELL", 80, "EMA9 crossed below EMA21 exit", ["EMA9 crossed below EMA21"], warnings)
     if last["StrategyState"] == "ARMED":
