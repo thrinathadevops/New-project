@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from intraday_advisor.price_action import analyze_price_action
+
 
 @dataclass(frozen=True)
 class AnalysisDecision:
@@ -69,8 +71,9 @@ def ema_swing_breakout_decision(ticker: str, df: pd.DataFrame) -> AnalysisDecisi
         return AnalysisDecision(ticker, "HOLD", 0, "Insufficient data", [], ["Need EMA9, EMA21, swing levels, and ATR before analysis."])
 
     last = usable.iloc[-1]
+    price_action = analyze_price_action(strategy)
     reasons: list[str] = []
-    warnings: list[str] = []
+    warnings: list[str] = list(price_action.warnings)
 
     if last["EMA9"] > last["EMA21"]:
         reasons.append("EMA9 is above EMA21")
@@ -79,6 +82,8 @@ def ema_swing_breakout_decision(ticker: str, df: pd.DataFrame) -> AnalysisDecisi
 
     if pd.notna(last.get("EMABreakoutLevel")):
         reasons.append(f"breakout level is {float(last['EMABreakoutLevel']):.2f}")
+
+    reasons.extend(price_action.reasons)
 
     if last["Close"] > last["VWAP"]:
         reasons.append("price is above VWAP")
@@ -98,7 +103,9 @@ def ema_swing_breakout_decision(ticker: str, df: pd.DataFrame) -> AnalysisDecisi
         reasons.append("RSI is in a tradable zone")
 
     if last["Signal"] == "BUY":
-        return AnalysisDecision(ticker, "BUY", max(55, 85 - len(warnings) * 7), "EMA9/EMA21 swing-high breakout", reasons, warnings)
+        price_action_ok = price_action.trend == "uptrend" and price_action.volume_confirmation == "bullish confirmation"
+        confidence = 88 if price_action_ok else 72
+        return AnalysisDecision(ticker, "BUY", max(55, confidence - len(warnings) * 5), "EMA9/EMA21 swing-high breakout + price action", reasons, warnings)
     if last["Signal"] == "SELL":
         return AnalysisDecision(ticker, "SELL", 80, "EMA9 crossed below EMA21 exit", ["EMA9 crossed below EMA21"], warnings)
     if last["StrategyState"] == "ARMED":

@@ -7,6 +7,7 @@ from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import fetch_yahoo_ohlcv, generate_sample_ohlcv, load_watchlist
 from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
+from intraday_advisor.price_action import analyze_price_action
 from intraday_advisor.risk import build_trade_plan_from_stop
 from intraday_advisor.screening import apply_screen, score_stocks
 from intraday_advisor.screener_provider import fetch_fundamental_candidates
@@ -36,6 +37,7 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
     df = apply_ema_swing_breakout_strategy(add_indicators(df))
     last = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"]).iloc[-1]
     decision = ema_swing_breakout_decision(symbol, df)
+    price_action = analyze_price_action(df)
     plan = None
     if decision.signal == "BUY":
         initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
@@ -70,6 +72,13 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
         "Signal": decision.signal,
         "Confidence": decision.confidence,
         "Setup": decision.setup,
+        "TrendStructure": price_action.trend,
+        "Support": price_action.support,
+        "Resistance": price_action.resistance,
+        "CandlePattern": price_action.candle_pattern,
+        "CandleBias": price_action.candle_bias,
+        "VolumeConfirmation": price_action.volume_confirmation,
+        "BreakoutState": price_action.breakout_state,
         "Reasons": "; ".join(decision.reasons),
         "Warnings": "; ".join(decision.warnings),
         "Plan": plan,
@@ -114,7 +123,7 @@ st.dataframe(
     use_container_width=True,
 )
 st.dataframe(
-    ranked[["Ticker", "Setup", "Confidence", "EMA9", "EMA21", "BreakoutLevel", "SwingHigh", "SwingLow", "Reasons", "Warnings"]],
+    ranked[["Ticker", "Setup", "Confidence", "TrendStructure", "CandlePattern", "VolumeConfirmation", "BreakoutState", "Support", "Resistance", "EMA9", "EMA21", "BreakoutLevel", "SwingHigh", "SwingLow", "Reasons", "Warnings"]],
     use_container_width=True,
 )
 fundamental_columns = ["Ticker", "MarketCapCr", "ROE", "ROCE", "DebtToEquity", "SalesGrowth", "PromoterHolding", "ProfitGrowth", "OPM", "EPS"]

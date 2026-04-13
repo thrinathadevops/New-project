@@ -48,6 +48,7 @@ def test_ema_swing_decision_reports_latest_buy():
         {
             "High": [10, 11, 12, 13],
             "Low": [8, 9, 10, 11],
+            "Open": [8.5, 9.5, 10.5, 12],
             "Close": [9, 10, 11, 13],
             "Volume": [1000, 1000, 1000, 1500],
             "EMA9": [8, 9, 11, 12],

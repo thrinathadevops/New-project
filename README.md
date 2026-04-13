@@ -11,6 +11,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - Fundamental screening from a Screener-style CSV export, plus technical screening by price, liquidity, ATR percentage, and EMA200 trend.
 - Scoring and ranking for watchlists.
 - BUY/HOLD/SELL signal generation using EMA9/EMA21 crossover, recent swing-high breakout confirmation, VWAP, RSI, volume, and ATR context.
+- Price-action confirmation for trend structure, support/resistance, candle psychology, volume confirmation, breakout/retest state, and stop zone.
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
 - Backtesting with brokerage, GST, STT, and slippage assumptions.
 - Paper broker and trade journal building blocks.
@@ -59,6 +60,19 @@ Close > EMA200
 ```
 
 After that, it waits for the EMA9/EMA21 crossover and recent swing-high breakout entry.
+
+## Price-action confirmation
+
+The analyzer also reads market psychology before accepting a setup:
+
+```text
+Trend structure: higher highs + higher lows = uptrend; lower highs + lower lows = downtrend.
+Support/resistance: recent reaction zones define breakout levels, entries, exits, and stop zones.
+Candlestick psychology: bullish/bearish engulfing, pin bars, doji, rejection wicks, buyer/seller control.
+Volume confirmation: breakout with rising volume is stronger; breakout with weak volume is warned as risky.
+Breakout strategy: watch break and retest behavior around resistance/support.
+Risk management: position size comes from capital risk, stop distance, and planned reward/risk.
+```
 
 Screener does not provide a public API. The app supports automatic fetching through a saved screen export URL. Set one of these:
 

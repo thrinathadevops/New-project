@@ -10,6 +10,7 @@ from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import generate_sample_ohlcv, load_watchlist
 from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
+from intraday_advisor.price_action import analyze_price_action
 from intraday_advisor.risk import build_trade_plan_from_stop
 from intraday_advisor.screening import apply_screen, score_stocks
 from intraday_advisor.screener_provider import fetch_fundamental_candidates
@@ -23,6 +24,7 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
     df = apply_ema_swing_breakout_strategy(add_indicators(generate_sample_ohlcv(seed=seed)))
     last = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"]).iloc[-1]
     decision = ema_swing_breakout_decision(symbol, df)
+    price_action = analyze_price_action(df)
     plan = None
     if decision.signal == "BUY":
         initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
@@ -32,6 +34,13 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
         "Signal": decision.signal,
         "Confidence": decision.confidence,
         "Setup": decision.setup,
+        "TrendStructure": price_action.trend,
+        "Support": price_action.support,
+        "Resistance": price_action.resistance,
+        "CandlePattern": price_action.candle_pattern,
+        "CandleBias": price_action.candle_bias,
+        "VolumeConfirmation": price_action.volume_confirmation,
+        "BreakoutState": price_action.breakout_state,
         "Reasons": "; ".join(decision.reasons),
         "Warnings": "; ".join(decision.warnings),
         "Close": float(last["Close"]),
@@ -130,6 +139,7 @@ def render_page(query: dict[str, list[str]]) -> str:
       <h2>Ranked Watchlist</h2>
       {table_html(ranked[["Ticker", "Signal", "Confidence", "Setup", "Score", "Close", "EMA9", "EMA21", "EMA200", "AboveEMA200", "BreakoutLevel", "SwingHigh", "SwingLow", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]])}
       <h3>Reasons</h3>
+      {table_html(ranked[["Ticker", "TrendStructure", "CandlePattern", "CandleBias", "VolumeConfirmation", "BreakoutState", "Support", "Resistance"]])}
       {table_html(ranked[["Ticker", "Reasons", "Warnings"]])}
       <h3>Fundamentals</h3>
       {table_html(ranked[[column for column in ["Ticker", "MarketCapCr", "ROE", "ROCE", "DebtToEquity", "SalesGrowth", "PromoterHolding", "ProfitGrowth", "OPM", "EPS"] if column in ranked.columns]])}
