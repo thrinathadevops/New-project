@@ -1,0 +1,10 @@
+numpy>=1.24
+pandas>=2.0
+plotly>=5.18
+streamlit>=1.30
+yfinance>=0.2.36
+pytest>=7.4
+smartapi-python>=1.4.8
+pyotp>=2.9
+logzero>=1.7
+websocket-client>=1.7
