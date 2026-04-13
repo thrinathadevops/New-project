@@ -14,6 +14,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - Price-action confirmation for trend structure, support/resistance, candle psychology, volume confirmation, breakout/retest state, and stop zone.
 - Smart-money context for fair value gaps, liquidity sweeps, OHLCV-based order-flow proxy, VWAP relation, and volume profile POC/value area.
 - Weekday situational analysis for Friday-low Monday revisits and Wednesday-low Thursday revisits.
+- Box theory context using the previous day high/low box, middle no-trade line, and wick rejection at box edges.
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
 - Backtesting with brokerage, GST, STT, and slippage assumptions.
 - Paper broker and trade journal building blocks.
@@ -122,6 +123,27 @@ If Wednesday high is lower than Monday high, watch Wednesday low as a possible T
 ```
 
 These are shown as situational levels, not automatic trades. Use them as context with EMA/FVG/VWAP/price-action confirmation.
+
+## Box Theory
+
+The analyzer builds a box from the previous trading day:
+
+```text
+Box high = previous day's high
+Box low = previous day's low
+Middle line = 50% of that range
+```
+
+Rules:
+
+```text
+Price near bottom of box: only look for BUY WATCH setups.
+Price near top of box: only look for SELL WATCH setups.
+Price near middle line: no trade; ignore signals because false signals are common there.
+Entry confirmation: look for a long-wick rejection candle at the box edge.
+```
+
+In code this appears as `BoxHigh`, `BoxLow`, `BoxMiddle`, `BoxZone`, `BoxWickSignal`, and `BoxBias`.
 
 Screener does not provide a public API. The app supports automatic fetching through a saved screen export URL. Set one of these:
 

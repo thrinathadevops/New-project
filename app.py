@@ -2,6 +2,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from intraday_advisor.box_theory import analyze_box_theory
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import fetch_yahoo_ohlcv, generate_sample_ohlcv, load_watchlist
 from intraday_advisor.database import DEFAULT_DB_PATH, load_fundamentals, store_analysis_results, store_fundamentals, store_ohlcv
@@ -45,6 +46,7 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
     price_action = analyze_price_action(df)
     smart_money = analyze_smart_money(df)
     situational = latest_situational_summary(df)
+    box = analyze_box_theory(df)
     plan = None
     if decision.signal == "BUY":
         initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
@@ -97,6 +99,12 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
         "ValueAreaLow": smart_money.value_area_low,
         "ValueAreaHigh": smart_money.value_area_high,
         "VWAPRelation": smart_money.vwap_relation,
+        "BoxHigh": box.previous_day_high,
+        "BoxLow": box.previous_day_low,
+        "BoxMiddle": box.middle_line,
+        "BoxZone": box.zone,
+        "BoxWickSignal": box.wick_signal,
+        "BoxBias": box.bias,
         **situational,
         "Reasons": "; ".join(decision.reasons),
         "Warnings": "; ".join(decision.warnings),
@@ -160,6 +168,10 @@ st.dataframe(
     use_container_width=True,
 )
 st.dataframe(
+    ranked[["Ticker", "BoxHigh", "BoxLow", "BoxMiddle", "BoxZone", "BoxWickSignal", "BoxBias"]],
+    use_container_width=True,
+)
+st.dataframe(
     ranked[["Ticker", "SituationalRule", "SituationalLevel", "SituationalTargetDate", "SituationalVisited", "SituationalNote"]],
     use_container_width=True,
 )
@@ -187,5 +199,10 @@ fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["EMA9"], name="EMA9"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["EMA21"], name="EMA21"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["EMA200"], name="EMA200"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["RecentSwingHigh"], name="Recent Swing High"))
+box = analyze_box_theory(frames[selected])
+if box.previous_day_high is not None and box.previous_day_low is not None and box.middle_line is not None:
+    fig.add_hline(y=box.previous_day_high, line_dash="dash", annotation_text="Box High")
+    fig.add_hline(y=box.middle_line, line_dash="dot", annotation_text="Box Middle")
+    fig.add_hline(y=box.previous_day_low, line_dash="dash", annotation_text="Box Low")
 fig.update_layout(height=560, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)

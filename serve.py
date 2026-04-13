@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
+from intraday_advisor.box_theory import analyze_box_theory
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import generate_sample_ohlcv, load_watchlist
 from intraday_advisor.database import DEFAULT_DB_PATH, load_fundamentals, store_analysis_results, store_fundamentals, store_ohlcv
@@ -31,6 +32,7 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
     price_action = analyze_price_action(df)
     smart_money = analyze_smart_money(df)
     situational = latest_situational_summary(df)
+    box = analyze_box_theory(df)
     plan = None
     if decision.signal == "BUY":
         initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
@@ -58,6 +60,12 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
         "ValueAreaLow": smart_money.value_area_low,
         "ValueAreaHigh": smart_money.value_area_high,
         "VWAPRelation": smart_money.vwap_relation,
+        "BoxHigh": box.previous_day_high,
+        "BoxLow": box.previous_day_low,
+        "BoxMiddle": box.middle_line,
+        "BoxZone": box.zone,
+        "BoxWickSignal": box.wick_signal,
+        "BoxBias": box.bias,
         **situational,
         "Reasons": "; ".join(decision.reasons),
         "Warnings": "; ".join(decision.warnings),
@@ -165,6 +173,7 @@ def render_page(query: dict[str, list[str]]) -> str:
       <h3>Reasons</h3>
       {table_html(ranked[["Ticker", "TrendStructure", "CandlePattern", "CandleBias", "VolumeConfirmation", "BreakoutState", "Support", "Resistance"]])}
       {table_html(ranked[["Ticker", "FVG", "FVGLower", "FVGUpper", "FVGMitigated", "LiquiditySweep", "OrderFlow", "CumulativeDelta", "VolumePOC", "ValueAreaLow", "ValueAreaHigh", "VWAPRelation"]])}
+      {table_html(ranked[["Ticker", "BoxHigh", "BoxLow", "BoxMiddle", "BoxZone", "BoxWickSignal", "BoxBias"]])}
       {table_html(ranked[["Ticker", "SituationalRule", "SituationalLevel", "SituationalTargetDate", "SituationalVisited", "SituationalNote"]])}
       {table_html(ranked[["Ticker", "Reasons", "Warnings"]])}
       <h3>Fundamentals</h3>

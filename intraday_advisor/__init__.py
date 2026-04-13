@@ -3,6 +3,7 @@
 __all__ = [
     "backtest",
     "angel_one",
+    "box_theory",
     "config",
     "data",
     "database",
