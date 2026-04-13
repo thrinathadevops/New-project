@@ -6,10 +6,12 @@ __all__ = [
     "config",
     "data",
     "execution",
+    "fundamentals",
     "indicators",
     "journal",
     "risk",
     "screening",
+    "screener_provider",
     "signals",
     "strategy",
 ]

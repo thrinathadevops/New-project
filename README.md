@@ -8,7 +8,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 
 - Data ingestion and cleaning for OHLCV, with optional Yahoo Finance data and deterministic offline sample data.
 - Technical indicators: SMA20/50/200, EMA12/26, ATR14, RSI14, MACD, OBV, VWAP, 10-bar momentum, ADTV20.
-- Screening by price, liquidity, market cap, float, ATR percentage, and sector.
+- Fundamental screening from a Screener-style CSV export, plus technical screening by price, liquidity, ATR percentage, and EMA200 trend.
 - Scoring and ranking for watchlists.
 - BUY/HOLD/SELL signal generation using EMA9/EMA21 crossover, recent swing-high breakout confirmation, VWAP, RSI, volume, and ATR context.
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
@@ -35,6 +35,53 @@ streamlit run app.py
 ```
 
 The dashboard starts in offline sample-data mode. Toggle `Use Yahoo Finance data` in the sidebar when you have network access.
+
+## Automatic Screener quality filter
+
+Create a screen in Screener.in with this logic:
+
+```text
+Market Capitalization < 10000
+AND Return on equity > 20
+AND Return on capital employed > 20
+AND Debt to equity < 0.25
+AND Sales growth > 20
+AND Promoter holding > 50
+AND Profit growth > 20
+AND OPM > 15
+AND EPS > 20
+```
+
+The analyzer then keeps only those stocks and applies the technical condition:
+
+```text
+Close > EMA200
+```
+
+After that, it waits for the EMA9/EMA21 crossover and recent swing-high breakout entry.
+
+Screener does not provide a public API. The app supports automatic fetching through a saved screen export URL. Set one of these:
+
+```powershell
+$env:SCREENER_EXPORT_URL="https://www.screener.in/api/export/screen/?screen_id=YOUR_SCREEN_ID&slug_name=YOUR_SLUG&url_name=YOUR_URL_NAME"
+```
+
+Or:
+
+```powershell
+$env:SCREENER_SCREEN_ID="YOUR_SCREEN_ID"
+$env:SCREENER_SLUG_NAME="your-slug"
+$env:SCREENER_URL_NAME="your-url-name"
+```
+
+If your export requires login:
+
+```powershell
+$env:SCREENER_EMAIL="your_email"
+$env:SCREENER_PASSWORD="your_password"
+```
+
+Keep these values in environment variables, not in source code.
 
 ## Angel One SmartAPI setup
 
@@ -72,6 +119,7 @@ intraday_advisor/
   config.py       Risk and cost settings
   data.py         OHLCV fetching, cleaning, cache helpers, sample data
   execution.py    Paper broker simulator
+  fundamentals.py Screener CSV normalization and quality filter
   indicators.py   Technical indicators
   journal.py      CSV trade journal
   risk.py         Position sizing and trade plans

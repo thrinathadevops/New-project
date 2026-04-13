@@ -27,7 +27,11 @@ def apply_screen(
 
 def score_stocks(stocks: pd.DataFrame) -> pd.DataFrame:
     df = stocks.copy()
-    df["TrendScore"] = (df["Close"] > df["SMA20"]).astype(int) + (df["SMA20"] > df["SMA50"]).astype(int)
+    df["TrendScore"] = (
+        (df["Close"] > df["SMA20"]).astype(int)
+        + (df["SMA20"] > df["SMA50"]).astype(int)
+        + (df["Close"] > df.get("EMA200", df["Close"])).astype(int)
+    )
     df["LiquidityScore"] = df["ADTV20"].rank(pct=True)
     df["VolatilityScore"] = (df["ATR14"] / df["Close"]).rank(pct=True)
     df["MomentumScore"] = df["Momentum10"].rank(pct=True)
@@ -40,4 +44,3 @@ def score_stocks(stocks: pd.DataFrame) -> pd.DataFrame:
         + df["RSIScore"]
     )
     return df.sort_values("Score", ascending=False)
-

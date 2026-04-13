@@ -13,6 +13,7 @@ dependencies = [
     "pyotp>=2.9",
     "logzero>=1.7",
     "websocket-client>=1.7",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]

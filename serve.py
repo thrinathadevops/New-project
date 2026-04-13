@@ -8,9 +8,11 @@ import pandas as pd
 
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import generate_sample_ohlcv, load_watchlist
+from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.risk import build_trade_plan_from_stop
 from intraday_advisor.screening import apply_screen, score_stocks
+from intraday_advisor.screener_provider import fetch_fundamental_candidates
 from intraday_advisor.strategy import apply_ema_swing_breakout_strategy, ema_swing_breakout_decision
 
 
@@ -41,6 +43,8 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
         "SMA50": float(last["SMA50"]),
         "EMA9": float(last["EMA9"]),
         "EMA21": float(last["EMA21"]),
+        "EMA200": float(last["EMA200"]),
+        "AboveEMA200": bool(last["Close"] > last["EMA200"]),
         "BreakoutLevel": float(last["EMABreakoutLevel"]) if pd.notna(last["EMABreakoutLevel"]) else None,
         "SwingHigh": float(last["RecentSwingHigh"]),
         "SwingLow": float(last["RecentSwingLow"]),
@@ -62,7 +66,15 @@ def render_page(query: dict[str, list[str]]) -> str:
     symbols_text = query.get("symbols", [DEFAULT_SYMBOLS])[0]
     capital = float(query.get("capital", ["20000"])[0])
     risk_pct = float(query.get("risk", ["2"])[0]) / 100
-    symbols = load_watchlist(symbols_text)
+    fundamental_candidates = pd.DataFrame()
+    screener_note = ""
+    try:
+        fundamental_candidates = fetch_fundamental_candidates()
+        screener_note = f"{len(fundamental_candidates)} Screener stocks passed fundamentals."
+    except Exception as exc:
+        screener_note = f"Automatic Screener fetch skipped: {exc}"
+
+    symbols = fundamental_candidates["Ticker"].tolist() if not fundamental_candidates.empty else load_watchlist(symbols_text)
     rows = []
     plans = []
     for index, symbol in enumerate(symbols):
@@ -71,8 +83,12 @@ def render_page(query: dict[str, list[str]]) -> str:
         if plan:
             plans.append(plan.__dict__)
     summary = pd.DataFrame(rows)
-    ranked = score_stocks(apply_screen(summary, min_market_cap=2_000_000_000, min_atr_pct=0.005))
+    if not fundamental_candidates.empty:
+        summary = merge_fundamentals(summary, fundamental_candidates)
+    technical_candidates = summary[summary["AboveEMA200"]].copy()
+    ranked = score_stocks(apply_screen(technical_candidates, min_market_cap=2_000_000_000, min_atr_pct=0.005))
     plan_df = pd.DataFrame(plans)
+    note = f"{screener_note} Only Screener candidates above EMA200 are considered when the provider is configured."
 
     return f"""<!doctype html>
 <html lang="en">
@@ -109,11 +125,14 @@ def render_page(query: dict[str, list[str]]) -> str:
       <label>Risk % <input name="risk" type="number" step="0.25" value="{risk_pct * 100:.2f}"></label>
       <button type="submit">Analyze</button>
     </form>
+    <p class="notice">{html.escape(note)}</p>
     <section>
       <h2>Ranked Watchlist</h2>
-      {table_html(ranked[["Ticker", "Signal", "Confidence", "Setup", "Score", "Close", "EMA9", "EMA21", "BreakoutLevel", "SwingHigh", "SwingLow", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]])}
+      {table_html(ranked[["Ticker", "Signal", "Confidence", "Setup", "Score", "Close", "EMA9", "EMA21", "EMA200", "AboveEMA200", "BreakoutLevel", "SwingHigh", "SwingLow", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]])}
       <h3>Reasons</h3>
       {table_html(ranked[["Ticker", "Reasons", "Warnings"]])}
+      <h3>Fundamentals</h3>
+      {table_html(ranked[[column for column in ["Ticker", "MarketCapCr", "ROE", "ROCE", "DebtToEquity", "SalesGrowth", "PromoterHolding", "ProfitGrowth", "OPM", "EPS"] if column in ranked.columns]])}
     </section>
     <section>
       <h2>Trade Plans</h2>

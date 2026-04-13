@@ -68,6 +68,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     enriched["EMA21"] = ema(enriched["Close"], 21)
     enriched["EMA12"] = ema(enriched["Close"], 12)
     enriched["EMA26"] = ema(enriched["Close"], 26)
+    enriched["EMA200"] = ema(enriched["Close"], 200)
     enriched["ATR14"] = atr(enriched, 14)
     enriched["RSI14"] = rsi(enriched["Close"], 14)
     enriched = enriched.join(macd(enriched["Close"]))

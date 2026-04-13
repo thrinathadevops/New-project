@@ -5,9 +5,11 @@ import streamlit as st
 from intraday_advisor.angel_one import AngelOneClient
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import fetch_yahoo_ohlcv, generate_sample_ohlcv, load_watchlist
+from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.risk import build_trade_plan_from_stop
 from intraday_advisor.screening import apply_screen, score_stocks
+from intraday_advisor.screener_provider import fetch_fundamental_candidates
 from intraday_advisor.strategy import apply_ema_swing_breakout_strategy, ema_swing_breakout_decision
 
 
@@ -23,6 +25,7 @@ with st.sidebar:
     use_live_data = st.toggle("Use Yahoo Finance data", value=False)
     period = st.selectbox("Data period", ["5d", "30d", "60d"], index=1)
     interval = st.selectbox("Candle interval", ["5m", "15m", "30m", "1h", "1d"], index=1)
+    use_screener_auto = st.toggle("Use automatic Screener screen", value=True)
 
 
 def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
@@ -55,6 +58,8 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
         "SMA50": float(last["SMA50"]),
         "EMA9": float(last["EMA9"]),
         "EMA21": float(last["EMA21"]),
+        "EMA200": float(last["EMA200"]),
+        "AboveEMA200": bool(last["Close"] > last["EMA200"]),
         "BreakoutLevel": float(last["EMABreakoutLevel"]) if pd.notna(last["EMABreakoutLevel"]) else None,
         "SwingHigh": float(last["RecentSwingHigh"]),
         "SwingLow": float(last["RecentSwingLow"]),
@@ -72,7 +77,15 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
     return df, summary
 
 
-symbols = load_watchlist(symbols_text)
+fundamental_candidates = pd.DataFrame()
+if use_screener_auto:
+    try:
+        fundamental_candidates = fetch_fundamental_candidates()
+        st.sidebar.success(f"{len(fundamental_candidates)} Screener stocks passed fundamentals.")
+    except Exception as exc:
+        st.sidebar.warning(f"Automatic Screener fetch skipped: {exc}")
+
+symbols = fundamental_candidates["Ticker"].tolist() if not fundamental_candidates.empty else load_watchlist(symbols_text)
 results = []
 frames = {}
 for index, symbol in enumerate(symbols):
@@ -87,17 +100,27 @@ if not results:
     st.stop()
 
 summary_df = pd.DataFrame([{key: value for key, value in row.items() if key != "Plan"} for row in results])
-ranked = score_stocks(apply_screen(summary_df, min_market_cap=2_000_000_000, min_atr_pct=0.005))
+if not fundamental_candidates.empty:
+    summary_df = merge_fundamentals(summary_df, fundamental_candidates)
+
+technical_candidates = summary_df[summary_df["AboveEMA200"]].copy()
+ranked = score_stocks(apply_screen(technical_candidates, min_market_cap=2_000_000_000, min_atr_pct=0.005))
 
 st.subheader("Ranked Watchlist")
+if not fundamental_candidates.empty:
+    st.caption("Only stocks passing your Screener fundamentals and trading above EMA200 are considered.")
 st.dataframe(
-    ranked[["Ticker", "Signal", "Score", "Close", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]].round(3),
+    ranked[["Ticker", "Signal", "Score", "Close", "EMA200", "AboveEMA200", "ATR14", "ATR%", "RSI14", "ADTV20", "Momentum10"]].round(3),
     use_container_width=True,
 )
 st.dataframe(
     ranked[["Ticker", "Setup", "Confidence", "EMA9", "EMA21", "BreakoutLevel", "SwingHigh", "SwingLow", "Reasons", "Warnings"]],
     use_container_width=True,
 )
+fundamental_columns = ["Ticker", "MarketCapCr", "ROE", "ROCE", "DebtToEquity", "SalesGrowth", "PromoterHolding", "ProfitGrowth", "OPM", "EPS"]
+if not fundamental_candidates.empty and all(column in ranked.columns for column in fundamental_columns):
+    st.subheader("Fundamental Quality")
+    st.dataframe(ranked[fundamental_columns].round(2), use_container_width=True)
 
 plans = [row["Plan"] for row in results if row["Plan"] is not None]
 st.subheader("Trade Plans")
@@ -136,6 +159,7 @@ fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["SMA20"], name="SMA20"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["SMA50"], name="SMA50"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["EMA9"], name="EMA9"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["EMA21"], name="EMA21"))
+fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["EMA200"], name="EMA200"))
 fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["RecentSwingHigh"], name="Recent Swing High"))
 fig.update_layout(height=560, xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
