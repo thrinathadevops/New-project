@@ -8,6 +8,7 @@ import pandas as pd
 
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import generate_sample_ohlcv, load_watchlist
+from intraday_advisor.database import DEFAULT_DB_PATH, load_fundamentals, store_analysis_results, store_fundamentals, store_ohlcv
 from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.price_action import analyze_price_action
@@ -24,6 +25,7 @@ DEFAULT_SYMBOLS = "RELIANCE,HDFCBANK,INFY,TATAMOTORS,JSWSTEEL"
 
 def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[dict, object | None]:
     df = apply_ema_swing_breakout_strategy(add_indicators(generate_sample_ohlcv(seed=seed)))
+    store_ohlcv(symbol, df[["Open", "High", "Low", "Close", "Volume"]], DEFAULT_DB_PATH, source="sample")
     last = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"]).iloc[-1]
     decision = ema_swing_breakout_decision(symbol, df)
     price_action = analyze_price_action(df)
@@ -95,9 +97,14 @@ def render_page(query: dict[str, list[str]]) -> str:
     screener_note = ""
     try:
         fundamental_candidates = fetch_fundamental_candidates()
+        store_fundamentals(fundamental_candidates, DEFAULT_DB_PATH)
         screener_note = f"{len(fundamental_candidates)} Screener stocks passed fundamentals."
     except Exception as exc:
         screener_note = f"Automatic Screener fetch skipped: {exc}"
+        cached = load_fundamentals(DEFAULT_DB_PATH)
+        if not cached.empty:
+            fundamental_candidates = cached
+            screener_note += f" Using {len(fundamental_candidates)} cached SQLite fundamental rows."
 
     symbols = fundamental_candidates["Ticker"].tolist() if not fundamental_candidates.empty else load_watchlist(symbols_text)
     rows = []
@@ -112,6 +119,7 @@ def render_page(query: dict[str, list[str]]) -> str:
         summary = merge_fundamentals(summary, fundamental_candidates)
     technical_candidates = summary[summary["AboveEMA200"]].copy()
     ranked = score_stocks(apply_screen(technical_candidates, min_market_cap=2_000_000_000, min_atr_pct=0.005))
+    store_analysis_results(ranked, DEFAULT_DB_PATH)
     plan_df = pd.DataFrame(plans)
     note = f"{screener_note} Only Screener candidates above EMA200 are considered when the provider is configured."
 

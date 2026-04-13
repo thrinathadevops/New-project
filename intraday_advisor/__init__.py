@@ -5,6 +5,7 @@ __all__ = [
     "angel_one",
     "config",
     "data",
+    "database",
     "execution",
     "fundamentals",
     "indicators",

@@ -19,6 +19,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - Paper broker and trade journal building blocks.
 - Optional Angel One SmartAPI adapter for historical candles and symbol-token lookup. The dashboard does not place live orders.
 - Streamlit dashboard and unit tests.
+- SQLite cache for OHLCV, fundamentals, analysis results, and journal-ready records.
 
 ## Run locally without extra UI packages
 
@@ -38,6 +39,25 @@ streamlit run app.py
 ```
 
 The dashboard starts in offline sample-data mode. Toggle `Use Yahoo Finance data` in the sidebar when you have network access.
+
+## Database
+
+The app uses SQLite by default:
+
+```text
+data/intraday_advisor.sqlite
+```
+
+SQLite is a good fit for this local analyzer because it needs no separate server and can store:
+
+```text
+ohlcv              price/volume candles by ticker and source
+fundamentals       Screener quality-filter data
+analysis_results   latest ranked watchlist output and reasons
+trade_journal      journal-ready paper/order records
+```
+
+If you later run live tick data continuously or use multiple machines, this layer can be upgraded to Postgres without changing the strategy modules.
 
 ## Automatic Screener quality filter
 

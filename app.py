@@ -4,6 +4,7 @@ import streamlit as st
 
 from intraday_advisor.config import RiskConfig
 from intraday_advisor.data import fetch_yahoo_ohlcv, generate_sample_ohlcv, load_watchlist
+from intraday_advisor.database import DEFAULT_DB_PATH, load_fundamentals, store_analysis_results, store_fundamentals, store_ohlcv
 from intraday_advisor.fundamentals import merge_fundamentals
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.price_action import analyze_price_action
@@ -28,6 +29,7 @@ with st.sidebar:
     period = st.selectbox("Data period", ["5d", "30d", "60d"], index=1)
     interval = st.selectbox("Candle interval", ["5m", "15m", "30m", "1h", "1d"], index=1)
     use_screener_auto = st.toggle("Use automatic Screener screen", value=True)
+    use_db_cache = st.toggle("Use SQLite cache", value=True)
 
 
 def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
@@ -35,6 +37,8 @@ def analyse_symbol(symbol: str, seed: int) -> tuple[pd.DataFrame, dict]:
         df = fetch_yahoo_ohlcv(symbol, period=period, interval=interval)
     else:
         df = generate_sample_ohlcv(seed=seed)
+    if use_db_cache:
+        store_ohlcv(symbol, df, DEFAULT_DB_PATH, source="yahoo" if use_live_data else "sample")
     df = apply_ema_swing_breakout_strategy(add_indicators(df))
     last = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"]).iloc[-1]
     decision = ema_swing_breakout_decision(symbol, df)
@@ -105,9 +109,16 @@ fundamental_candidates = pd.DataFrame()
 if use_screener_auto:
     try:
         fundamental_candidates = fetch_fundamental_candidates()
+        if use_db_cache:
+            store_fundamentals(fundamental_candidates, DEFAULT_DB_PATH)
         st.sidebar.success(f"{len(fundamental_candidates)} Screener stocks passed fundamentals.")
     except Exception as exc:
         st.sidebar.warning(f"Automatic Screener fetch skipped: {exc}")
+        if use_db_cache:
+            cached = load_fundamentals(DEFAULT_DB_PATH)
+            if not cached.empty:
+                fundamental_candidates = cached
+                st.sidebar.info(f"Using {len(fundamental_candidates)} cached fundamental rows from SQLite.")
 
 symbols = fundamental_candidates["Ticker"].tolist() if not fundamental_candidates.empty else load_watchlist(symbols_text)
 results = []
@@ -129,6 +140,9 @@ if not fundamental_candidates.empty:
 
 technical_candidates = summary_df[summary_df["AboveEMA200"]].copy()
 ranked = score_stocks(apply_screen(technical_candidates, min_market_cap=2_000_000_000, min_atr_pct=0.005))
+if use_db_cache and not ranked.empty:
+    store_analysis_results(ranked, DEFAULT_DB_PATH)
+    st.caption(f"Cached latest analysis in {DEFAULT_DB_PATH}.")
 
 st.subheader("Ranked Watchlist")
 if not fundamental_candidates.empty:
