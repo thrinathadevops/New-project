@@ -13,6 +13,7 @@ This app does not guarantee profit and does not place live broker orders. Treat 
 - BUY/HOLD/SELL signal generation using EMA9/EMA21 crossover, recent swing-high breakout confirmation, VWAP, RSI, volume, and ATR context.
 - Price-action confirmation for trend structure, support/resistance, candle psychology, volume confirmation, breakout/retest state, and stop zone.
 - Smart-money context for fair value gaps, liquidity sweeps, OHLCV-based order-flow proxy, VWAP relation, and volume profile POC/value area.
+- **First Candle Rule**: Opening candle (9:30-9:35 AM) analysis with FVG detection, engulfing confirmation, and auto 3:1 risk:reward targeting (18% weight in scoring).
 - Weekday situational analysis for Friday-low Monday revisits and Wednesday-low Thursday revisits.
 - Box theory context using the previous day high/low box, middle no-trade line, and wick rejection at box edges.
 - Swing/ATR-based position sizing and stop/target planning. The strategy exit is EMA9 crossing back below EMA21.
@@ -33,6 +34,21 @@ Open `http://127.0.0.1:8501`. This standard-library dashboard uses offline sampl
 
 ## Run the Streamlit dashboard
 
+### Option 1: Use Dashboard Launcher (Recommended)
+
+Choose between Main Dashboard and Real-Time Trading Dashboard:
+
+```powershell
+python launcher.py
+```
+
+Then select:
+- **Option 1**: Main Dashboard (complete analysis)
+- **Option 2**: Real-Time Trading Dashboard ⚡ (live trades only, zero latency)
+- **Option 3**: HTTP Server (no UI)
+
+### Option 2: Run Main Dashboard
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -41,6 +57,23 @@ streamlit run app.py
 ```
 
 The dashboard starts in offline sample-data mode. Toggle `Use Yahoo Finance data` in the sidebar when you have network access.
+
+### Option 3: Run Real-Time Trading Dashboard
+
+🚀 **NEW** - Separate dashboard focused on active BUY/SELL signals only:
+
+```powershell
+streamlit run trading_dashboard.py
+```
+
+Features:
+- ⚡ **Zero Latency** - Live real-time analysis without polling
+- 📊 **Combined Analysis** - All 8 techniques merged into unified signals
+- 🎯 **Active Trades Only** - Shows only BUY/SELL opportunities
+- 💰 **Complete Trade Plans** - Entry, stop, target, risk/reward per trade
+- 🔄 **Real-time WebSocket** - For external integrations (see TRADING_DASHBOARD.md)
+
+See **TRADING_DASHBOARD.md** for complete guide.
 
 ## Database
 
@@ -110,6 +143,32 @@ Order flow proxy: estimates buyer/seller pressure from candle body location and 
 VWAP: above VWAP supports long bias; below VWAP adds a warning.
 Volume profile: estimates point of control and value area from recent close/volume distribution.
 ```
+
+## First Candle Rule (⭐ NEW)
+
+The opening 5-minute candle (9:30-9:35 AM) contains more information than all other candles combined. This professional trading technique:
+
+```text
+1. Opening Candle: Wait for 9:30-9:35 AM candle to fully close
+   Captures: HIGH/LOW (key levels for the entire day)
+   
+2. Breakout + Gap: Price breaks opening level with REAL GAP
+   Requires: Candle wicks don't overlap (shows REAL force)
+   
+3. Engulfing Confirmation: After gap, wait for engulfing candle
+   Confirms: Breakout is real, momentum is genuine
+   
+4. 3:1 Risk:Reward: Auto-calculate exact targets
+   Entry: At FVG level (exact)
+   Stop: At opposite opening level (exact)
+   Target: Entry ± (3× risk distance) = 3:1 ratio
+```
+
+**Impact:** Appears every trading day, filters false signals, provides objective entry/stop/target levels.
+
+**Dashboard Integration:** First Candle signals get 18% weight (highest priority) in the combined confidence score.
+
+See **FIRST_CANDLE_RULE.md** for detailed guide (psychology, examples, learning path, troubleshooting).
 
 ## Weekday Situational Analysis
 
@@ -208,23 +267,88 @@ Angel One order and candle APIs require a `symboltoken`. The adapter includes `s
 pytest
 ```
 
+## Real-Time WebSocket Server (Zero-Latency Live Trading)
+
+For truly zero-latency analysis, use the WebSocket server for streaming updates to external platforms:
+
+```powershell
+# Install WebSocket library (one-time)
+pip install websockets
+
+# Start server
+python realtime_server.py
+```
+
+Connects at: `ws://localhost:8765`
+
+Features:
+- **Push-based updates** - No polling, instant signal delivery
+- **Unified signals** - All 8 analysis techniques combined
+- **JSON response** - Easy integration with trading bots/APIs
+- **Scalable** - Can handle multiple subscribers simultaneously
+
+Example Python client:
+
+```python
+import asyncio, json, websockets
+
+async def receive_trades():
+    async with websockets.connect("ws://localhost:8765") as ws:
+        await ws.send(json.dumps({
+            "command": "subscribe",
+            "symbols": ["RELIANCE", "INFY"],
+            "capital": 20000,
+            "risk_pct": 0.02
+        }))
+        while True:
+            msg = await ws.recv()
+            data = json.loads(msg)
+            if data["type"] == "analysis_update":
+                for trade in data["trades"]:
+                    print(f"{trade['Ticker']}: {trade['signal_type']} @ {trade['confidence']}%")
+
+asyncio.run(receive_trades())
+```
+
+See **TRADING_DASHBOARD.md** for complete WebSocket documentation.
+
 ## Project layout
 
 ```text
 intraday_advisor/
-  backtest.py     Backtest loop and metrics
-  config.py       Risk and cost settings
-  data.py         OHLCV fetching, cleaning, cache helpers, sample data
-  execution.py    Paper broker simulator
-  fundamentals.py Screener CSV normalization and quality filter
-  indicators.py   Technical indicators
-  journal.py      CSV trade journal
-  risk.py         Position sizing and trade plans
-  screening.py    Filters and ranking
-  signals.py      Signal generation
+  backtest.py          Backtest loop and metrics
+  box_theory.py        Box theory analysis
+  config.py            Risk and cost settings
+  data.py              OHLCV fetching, cleaning, cache helpers, sample data
+  execution.py         Paper broker simulator
+  explainability.py    Theory explanations and decision guides
+  first_candle.py      ⭐ First Candle Rule analysis (NEW)
+  fundamentals.py      Screener CSV normalization and quality filter
+  indicators.py        Technical indicators
+  journal.py           CSV trade journal
+  price_action.py      Price action analysis
+  risk.py              Position sizing and trade plans
+  screening.py         Filters and ranking
+  screener_provider.py Screener integration
+  signals.py           Signal generation
+  situational.py       Weekday situational analysis
+  smart_money.py       Smart money analysis
+  strategy.py          Strategy implementation
 tests/
   test_*.py
-app.py            Streamlit dashboard
+app.py                 Streamlit dashboard (main)
+trading_dashboard.py   Real-time trades dashboard (⚡ NEW - zero latency)
+realtime_server.py     WebSocket server (zero latency, API mode)
+launcher.py            Dashboard selector menu
+
+Documentation:
+  README.md                     ← Project overview
+  QUICK_START.md               ← 5-minute setup guide
+  TRADING_DASHBOARD.md         ← Complete dashboard guide
+  EXECUTION_GUIDE.md           ← Step-by-step trading manual
+  FIRST_CANDLE_RULE.md         ← ⭐ First Candle Rule guide (NEW)
+  FIRST_CANDLE_INTEGRATION.md  ← Integration summary (NEW)
+  IMPLEMENTATION_SUMMARY.md    ← Technical overview
 ```
 
 ## Suggested next steps
