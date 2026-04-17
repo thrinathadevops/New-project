@@ -36,11 +36,29 @@ def score_stocks(stocks: pd.DataFrame) -> pd.DataFrame:
     df["VolatilityScore"] = (df["ATR14"] / df["Close"]).rank(pct=True)
     df["MomentumScore"] = df["Momentum10"].rank(pct=True)
     df["RSIScore"] = (1 - ((df["RSI14"] - 55).abs() / 55)).clip(lower=0)
+    
+    # 126 Custom Engine Scores
+    df["SmartMoneyScore"] = (
+        df.get("Bullish_OB", pd.Series([False]*len(df))).astype(int) * 2.0
+        + df.get("Bullish_FVG_Score", pd.Series([False]*len(df))).astype(int) * 1.5
+        - df.get("Bearish_OB", pd.Series([False]*len(df))).astype(int) * 2.0
+        - df.get("Bearish_FVG_Score", pd.Series([False]*len(df))).astype(int) * 1.5
+    )
+    
+    df["AdvancedTrendScore"] = (
+        (df.get("SuperTrend_Dir", pd.Series([0]*len(df))) == 1).astype(int) * 2.0
+        + (df.get("Adaptive_MACD_Hist", pd.Series([0]*len(df))) > 0).astype(int) * 1.0
+        - (df.get("SuperTrend_Dir", pd.Series([0]*len(df))) == -1).astype(int) * 2.0
+        - (df.get("Adaptive_MACD_Hist", pd.Series([0]*len(df))) < 0).astype(int) * 1.0
+    )
+
     df["Score"] = (
         2.0 * df["TrendScore"]
         + df["LiquidityScore"]
         + df["VolatilityScore"]
         + df["MomentumScore"]
         + df["RSIScore"]
+        + df["SmartMoneyScore"]
+        + df["AdvancedTrendScore"]
     )
     return df.sort_values("Score", ascending=False)

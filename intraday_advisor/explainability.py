@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass(frozen=True)
@@ -138,9 +139,29 @@ def decision_guide(row: dict) -> tuple[str, str]:
         action = "WAIT / AVOID"
     elif signal == "BUY":
         action = "BUY WATCH"
+    elif signal == "SELL":
+        action = "SELL WATCH"
     else:
         action = "HOLD"
+        
+    current_price = row.get("Close", 0)
+    option_suggestion = "No Options Trade"
+    
+    if action == "BUY WATCH" and current_price > 0:
+        # Determine step size based on NSE basic rules
+        step = 10 if current_price < 1000 else 20 if current_price <= 3000 else 50
+        strike = round(current_price / step) * step
+        if strike < current_price:
+            strike += step # Lean slightly out of money to keep premium cheaper
+        option_suggestion = f"BUY {strike} CE (CALL OPTION)"
+        
+    elif action == "SELL WATCH" and current_price > 0:
+        step = 10 if current_price < 1000 else 20 if current_price <= 3000 else 50
+        strike = round(current_price / step) * step
+        if strike > current_price:
+            strike -= step
+        option_suggestion = f"BUY {strike} PE (PUT OPTION)"
 
     why = "; ".join(positives + blockers) if positives or blockers else "No strong combined signal."
-    return action, why
+    return action, why, option_suggestion
 

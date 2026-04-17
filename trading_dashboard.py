@@ -165,7 +165,8 @@ def analyze_symbol_combined(symbol: str, seed: int) -> dict:
         }
         
         # Get unified decision guide action
-        suggested_action, action_reason = decision_guide(row)
+        _dg = decision_guide(row)
+        suggested_action, action_reason = _dg[0], _dg[1]
         row["SuggestedAction"] = suggested_action
         row["ActionReason"] = action_reason
         

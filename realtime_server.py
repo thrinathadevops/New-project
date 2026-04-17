@@ -50,63 +50,62 @@ analysis_update_interval = 30  # seconds
 
 def calculate_signal_strength(decision, price_action, smart_money, box, row) -> dict:
     """
-    Calculate unified signal strength from all analysis techniques
-    Returns confidence score, bull/bear reasons, and risk/reward metrics
+    Custom Unified Tracker Score Engine using the newly implemented indicators.
+    Combines legacy logic with the new 126-Indicator modular engine outputs.
     """
     bull_signals = []
     bear_signals = []
     score = 50  # neutral baseline
     
-    # EMA signals (most important)
-    if decision.signal == "BUY":
-        bull_signals.append("EMA9 above EMA21 with swing-high breakout")
-        score += 20
-    elif decision.signal == "SELL":
-        bear_signals.append("EMA9 below EMA21")
-        score -= 20
-    
-    # Trend check
-    if row["AboveEMA200"]:
-        bull_signals.append("Price above EMA200 long-term trend")
-        score += 10
-    else:
-        bear_signals.append("Price below EMA200 - weak uptrend")
-        score -= 10
-    
-    # Price action
-    if price_action.trend == "strong uptrend":
-        bull_signals.append("Strong uptrend in price action")
+    # 1. New Custom Indicators: Smart Money Concepts
+    if row.get("Bullish_OB", False):
+        bull_signals.append("Bullish Order Block Formed")
         score += 15
-    elif price_action.trend == "downtrend":
-        bear_signals.append("Downtrend in price action")
+    elif row.get("Bearish_OB", False):
+        bear_signals.append("Bearish Order Block Formed")
         score -= 15
-    
-    # Volume confirmation
-    if price_action.volume_confirmation == "bullish confirmation":
-        bull_signals.append("Volume confirms move")
+        
+    if row.get("Bullish_FVG", False):
+        bull_signals.append("Bullish FVG Zone Identified")
         score += 10
-    
-    # Smart money indicators
-    if smart_money.order_flow == "buyer-dominant order flow":
-        bull_signals.append("Buyer-dominant order flow")
-        score += 10
-    elif smart_money.order_flow == "seller-dominant order flow":
-        bear_signals.append("Seller-dominant order flow")
+    elif row.get("Bearish_FVG", False):
+        bear_signals.append("Bearish FVG Zone Identified")
         score -= 10
-    
-    # VWAP
+        
+    if row.get("Liquidity_Sweep_Bullish", False):
+        bull_signals.append("Bullish Liquidity Sweep")
+        score += 15
+    elif row.get("Liquidity_Sweep_Bearish", False):
+        bear_signals.append("Bearish Liquidity Sweep")
+        score -= 15
+
+    # 2. New Custom Indicators: Trend & Oscillators
+    if row.get("SuperTrend_Dir", 0) == 1:
+        bull_signals.append("SuperTrend Bullish")
+        score += 10
+    elif row.get("SuperTrend_Dir", 0) == -1:
+        bear_signals.append("SuperTrend Bearish")
+        score -= 10
+        
+    macd_hist = row.get("Adaptive_MACD_Hist", 0)
+    if macd_hist > 0:
+        bull_signals.append("Adaptive MACD Momentum is Positive")
+        score += 5
+    elif macd_hist < 0:
+        bear_signals.append("Adaptive MACD Momentum is Negative")
+        score -= 5
+
+    # 3. Legacy Signals Confluence
+    if decision.signal == "BUY":
+        score += 10
+    elif decision.signal == "SELL":
+        score -= 10
+        
     if smart_money.vwap_relation == "above VWAP":
-        bull_signals.append("Above VWAP")
         score += 5
     elif smart_money.vwap_relation == "below VWAP":
-        bear_signals.append("Below VWAP")
         score -= 5
-    
-    # Box theory
-    if box.bias == "BUY WATCH":
-        bull_signals.append("Box bottom bullish setup")
-        score += 5
-    
+
     # Clamp score to 0-100
     confidence = max(0, min(100, score))
     
@@ -114,7 +113,7 @@ def calculate_signal_strength(decision, price_action, smart_money, box, row) -> 
         "confidence": confidence,
         "bull_signals": bull_signals,
         "bear_signals": bear_signals,
-        "signal_type": "BUY" if confidence > 60 else "SELL" if confidence < 40 else "HOLD"
+        "signal_type": "BUY" if confidence > 65 else "SELL" if confidence < 35 else "HOLD"
     }
 
 
@@ -141,7 +140,7 @@ async def analyze_symbol_realtime(symbol: str, seed: int, capital: float, risk_p
         box = analyze_box_theory(df)
         situational = latest_situational_summary(df)
         
-        # Build analysis row
+        # Build analysis row (incorporating new indicators)
         row = {
             "Ticker": symbol,
             "Close": float(last["Close"]),
@@ -162,6 +161,15 @@ async def analyze_symbol_realtime(symbol: str, seed: int, capital: float, risk_p
             "OrderFlow": smart_money.order_flow,
             "VWAPRelation": smart_money.vwap_relation,
             "BoxBias": box.bias,
+            # Custom 126-Engine output mapping
+            "Bullish_OB": bool(last.get("Bullish_OB", False)),
+            "Bearish_OB": bool(last.get("Bearish_OB", False)),
+            "Bullish_FVG": bool(last.get("Bullish_FVG", False)),
+            "Bearish_FVG": bool(last.get("Bearish_FVG", False)),
+            "Liquidity_Sweep_Bullish": bool(last.get("Liquidity_Sweep_Bullish", False)),
+            "Liquidity_Sweep_Bearish": bool(last.get("Liquidity_Sweep_Bearish", False)),
+            "Adaptive_MACD_Hist": float(last.get("Adaptive_MACD_Hist", 0)),
+            "SuperTrend_Dir": int(last.get("SuperTrend_Dir", 0)),
         }
         
         # Calculate signal strength
@@ -242,8 +250,8 @@ async def analysis_loop(symbols: list, capital: float, risk_pct: float):
                 if result:
                     results.append(result)
             
-            # Filter active trades only
-            active = [r for r in results if r.get("signal_type") in ["BUY", "SELL"] and r.get("confidence", 0) >= 60]
+            # Filter active trades only (using new confidence threshold from the advanced engine)
+            active = [r for r in results if r.get("signal_type") in ["BUY", "SELL"] and r.get("confidence", 0) >= 65]
             
             # Broadcast update
             await broadcast_update({

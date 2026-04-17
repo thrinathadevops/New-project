@@ -94,6 +94,52 @@ class AngelOneClient:
                     return str(token)
         raise LookupError(f"No exact NSE equity token found for {symbol}")
 
+    def get_open_positions(self) -> list[dict]:
+        """Fetch real-time open positions from Angel One."""
+        if self.smart_api is None:
+            try:
+                self.login()
+            except Exception as e:
+                # Silently catch offline errors to act as a fallback network failure handler
+                print(f"Angel One Login Failed inside get_open_positions: {e}")
+                return []
+                
+        try:
+            response = self.smart_api.position()
+            if not response.get("status"):
+                return []
+                
+            positions = response.get("data")
+            if not positions:
+                return []
+
+            active_positions = []
+            for pos in positions:
+                net_qty = int(pos.get("netqty", 0))
+                if net_qty != 0: # Only open positions
+                    avg_price = float(pos.get("avgnetprice", 0))
+                    # Fallback to buy price if parsing fails
+                    if avg_price == 0:
+                        avg_price = float(pos.get("buyavgprice", 0))
+                    
+                    symbol = pos.get("tradingsymbol", "UNKNOWN")
+                    # Clean up -EQ if it exists
+                    display_ticker = symbol.replace("-EQ", "")
+                    
+                    active_positions.append({
+                        "Ticker": display_ticker,
+                        "Option": symbol,
+                        "Entry Underlying Level": avg_price,
+                        "Target Level": avg_price * 1.20,  # 20% Profit Target default
+                        "Stop Loss Level": avg_price * 0.90, # 10% Stop Loss default
+                        "Source": "ANGEL_ONE_API",
+                        "Qty": net_qty
+                    })
+            return active_positions
+        except Exception as e:
+            print(f"Failed to fetch Angel One positions: {e}")
+            return []
+
     def place_intraday_order(
         self,
         plan: TradePlan,
