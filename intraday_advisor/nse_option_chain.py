@@ -53,9 +53,8 @@ def _nifty_spot_from_yahoo(symbol: str) -> float:
     return 0.0
 
 
-def _get_atm_strikes(spot: float, index: str, n: int = 8) -> list[int]:
+def _get_atm_strikes(spot: float, step: int, n: int = 8) -> list[int]:
     """Return n strikes above and below ATM."""
-    step = 50 if index == "NIFTY" else 100
     atm  = round(spot / step) * step
     return [int(atm + i * step) for i in range(-n, n + 1)]
 
@@ -135,21 +134,34 @@ def _build_synthetic_oi(strikes: list[int], spot: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def suggest_index_option(symbol: str = "NIFTY") -> dict:
+def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
     """
-    Analyse NIFTY / BANKNIFTY option chain and suggest CALL or PUT.
+    Analyse Any Equity/Index option chain and suggest CALL or PUT.
     Tries: Angel One LTP → falls back to synthetic model.
     """
     index = symbol.upper()
-    step  = 50 if index == "NIFTY" else 100
+    
+    # Dynamic strike stepping
+    if index == "NIFTY":
+        step = 50
+    elif index == "BANKNIFTY":
+        step = 100
+    else:
+        if spot <= 250: step = 2.5
+        elif spot <= 1000: step = 5
+        elif spot <= 3000: step = 10
+        elif spot <= 5000: step = 20
+        else: step = 50
 
     # ── 1. Get spot price ──────────────────────────────────────────────────
-    spot = _nifty_spot_from_yahoo(index)
-    if spot == 0:
-        return {"error": "Cannot fetch index spot price from Yahoo Finance", "symbol": symbol, "spot": 0}
+    if spot == 0.0:
+        spot = _nifty_spot_from_yahoo(index)
+        
+    if spot == 0.0:
+        return {"error": "Cannot fetch spot price. Please provide spot manually.", "symbol": symbol, "spot": 0}
 
     atm     = round(spot / step) * step
-    strikes = _get_atm_strikes(spot, index, n=10)
+    strikes = _get_atm_strikes(spot, step, n=10)
 
     # ── 2. Try Angel One live LTP ──────────────────────────────────────────
     df_oi      = pd.DataFrame()

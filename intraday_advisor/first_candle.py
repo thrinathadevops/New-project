@@ -52,9 +52,9 @@ class FirstCandleAnalysis:
     rr_ratio: Optional[float]
 
 
-def extract_opening_candle(df: pd.DataFrame) -> Optional[dict]:
+def extract_opening_candle(df: pd.DataFrame, open_hour: int = 9, open_minute: int = 15) -> Optional[dict]:
     """
-    Extract the opening 5-minute candle (9:30-9:35 AM).
+    Extract the opening 5-minute candle (e.g. 9:15-9:20 for NSE).
     Assumes df index contains time information or has a 'Time' column.
     
     Returns: Dict with OHLCV of opening candle or None if not found
@@ -62,12 +62,12 @@ def extract_opening_candle(df: pd.DataFrame) -> Optional[dict]:
     if df.empty:
         return None
     
-    # Try to find candles during 9:30-9:35 AM
+    # Try to find candles during the specified opening window
     # This assumes data has time information
     try:
         # If index is datetime
         if hasattr(df.index, 'hour') and hasattr(df.index, 'minute'):
-            opening_mask = (df.index.hour == 9) & (df.index.minute >= 30) & (df.index.minute <= 35)
+            opening_mask = (df.index.hour == open_hour) & (df.index.minute >= open_minute) & (df.index.minute <= open_minute + 5)
             opening_candles = df[opening_mask]
         else:
             # Fallback: use first candle in dataframe (assuming it's ordered by time)
@@ -227,12 +227,12 @@ def calculate_3_to_1_targets(
     return target, risk_distance, reward_distance
 
 
-def analyze_first_candle(df: pd.DataFrame) -> FirstCandleAnalysis:
+def analyze_first_candle(df: pd.DataFrame, open_hour: int = 9, open_minute: int = 15) -> FirstCandleAnalysis:
     """
     Complete first candle rule analysis.
     
     Process:
-    1. Extract opening candle (9:30-9:35 AM)
+    1. Extract opening candle for the market
     2. Determine opening trend
     3. Track for Fair Value Gap formation
     4. Confirm with engulfing candle
@@ -242,7 +242,7 @@ def analyze_first_candle(df: pd.DataFrame) -> FirstCandleAnalysis:
     """
     
     # Step 1: Extract opening candle
-    opening_candle = extract_opening_candle(df)
+    opening_candle = extract_opening_candle(df, open_hour, open_minute)
     if opening_candle is None:
         return FirstCandleAnalysis(
             opening_high=0, opening_low=0, opening_close=0, opening_volume=0,
