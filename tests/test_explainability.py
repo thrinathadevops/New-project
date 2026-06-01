@@ -9,7 +9,7 @@ def test_theory_info_rows_include_box_and_risk():
 
 
 def test_decision_guide_returns_buy_watch_for_clean_buy():
-    action, reason = decision_guide(
+    action, reason, option_suggestion = decision_guide(
         {
             "AboveEMA200": True,
             "Signal": "BUY",
@@ -18,14 +18,16 @@ def test_decision_guide_returns_buy_watch_for_clean_buy():
             "VWAPRelation": "above VWAP",
             "OrderFlow": "buyer-dominant order flow",
             "VolumeConfirmation": "bullish confirmation",
+            "Close": 500.0,
         }
     )
     assert action == "BUY WATCH"
     assert "above EMA200" in reason
+    assert "CE" in option_suggestion  # a clean BUY WATCH suggests a call option
 
 
 def test_decision_guide_avoids_middle_box():
-    action, reason = decision_guide(
+    action, reason, option_suggestion = decision_guide(
         {
             "AboveEMA200": True,
             "Signal": "BUY",
@@ -37,3 +39,4 @@ def test_decision_guide_avoids_middle_box():
     )
     assert action == "WAIT / AVOID"
     assert "box middle" in reason
+    assert option_suggestion == "No Options Trade"  # no trade when blocked

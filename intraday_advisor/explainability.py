@@ -96,7 +96,7 @@ def theory_info_rows() -> list[dict[str, object]]:
     ]
 
 
-def decision_guide(row: dict) -> tuple[str, str]:
+def decision_guide(row: dict) -> tuple[str, str, str]:
     blockers: list[str] = []
     positives: list[str] = []
 

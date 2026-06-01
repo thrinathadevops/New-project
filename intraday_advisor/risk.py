@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from intraday_advisor.config import RiskConfig
 
@@ -126,3 +126,79 @@ def should_halt_trading(
     daily_loss_hit = daily_pnl <= -(config.capital * config.daily_loss_limit_pct)
     drawdown_hit = current_equity <= peak_equity * (1 - config.max_drawdown_pause_pct)
     return daily_loss_hit or drawdown_hit
+
+
+@dataclass
+class LiveRiskState:
+    """Stateful risk governor for the live loop.
+
+    The repo already had ``can_open_trade`` and ``should_halt_trading`` but
+    nothing called them in a loop, so nothing actually stopped after a bad day
+    or capped how many trade ideas were surfaced at once. This binds those rules
+    to mutable session state and exposes a single gate, :meth:`can_admit`, that
+    the real-time engine checks before marking any signal actionable.
+    """
+
+    config: RiskConfig = field(default_factory=RiskConfig)
+    starting_equity: float | None = None
+    peak_equity: float | None = None
+    current_equity: float | None = None
+    realized_pnl: float = 0.0
+    open_risk: float = 0.0
+    force_halt: bool = False
+    halt_reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.starting_equity is None:
+            self.starting_equity = self.config.capital
+        if self.peak_equity is None:
+            self.peak_equity = self.starting_equity
+        if self.current_equity is None:
+            self.current_equity = self.starting_equity
+
+    def begin_cycle(self) -> None:
+        """Reset per-broadcast open-risk accounting before re-evaluating signals."""
+        self.open_risk = 0.0
+
+    def update_equity(self, current_equity: float) -> None:
+        self.current_equity = float(current_equity)
+        self.peak_equity = max(self.peak_equity, self.current_equity)
+        self.realized_pnl = self.current_equity - self.starting_equity
+
+    @property
+    def halted(self) -> bool:
+        if self.force_halt:
+            return True
+        return should_halt_trading(
+            self.realized_pnl, self.peak_equity, self.current_equity, self.config
+        )
+
+    def can_admit(self, new_trade_risk: float) -> bool:
+        """True if a new trade of this rupee-risk may be surfaced right now."""
+        if self.halted:
+            return False
+        return can_open_trade(
+            self.open_risk, new_trade_risk, self.config.capital,
+            self.config.max_total_open_risk_pct,
+        )
+
+    def admit(self, new_trade_risk: float) -> None:
+        """Record that a surfaced trade consumes part of the open-risk budget."""
+        self.open_risk += max(0.0, float(new_trade_risk))
+
+    def status(self) -> dict:
+        reason = self.halt_reason
+        if not reason and self.halted and not self.force_halt:
+            if self.realized_pnl <= -(self.config.capital * self.config.daily_loss_limit_pct):
+                reason = "daily loss limit hit"
+            else:
+                reason = "max drawdown pause hit"
+        return {
+            "halted": self.halted,
+            "halt_reason": reason,
+            "open_risk": round(self.open_risk, 2),
+            "open_risk_budget": round(self.config.capital * self.config.max_total_open_risk_pct, 2),
+            "realized_pnl": round(self.realized_pnl, 2),
+            "current_equity": round(self.current_equity, 2),
+            "peak_equity": round(self.peak_equity, 2),
+        }

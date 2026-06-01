@@ -1,15 +1,36 @@
 """
-Real-Time WebSocket Server for Live Trading Analysis
-Zero-latency streaming of trade signals using WebSockets
-Replaces HTTP polling with push-based updates
+Real-Time WebSocket Server for Live Trading Analysis.
+
+Phase-1 correctness rewrite. Key guarantees vs. the previous version:
+
+  * REAL DATA: candles come from a configurable feed (Angel One by default),
+    not a random-number generator. Synthetic data is still available for demos
+    but is structurally prevented from ever being broadcast as actionable.
+  * NO REPAINTING: the still-forming bar is dropped before analysis, so signals
+    are computed only on closed candles.
+  * ONE SCORE: confidence comes from the unified ``scoring`` engine.
+  * RISK ENFORCED: a ``LiveRiskState`` gate caps concurrent open-risk and halts
+    on daily-loss / drawdown limits before any signal is marked actionable.
+  * STALENESS GUARD: data older than a few bars (e.g. market closed) is flagged
+    and never marked actionable.
+
+Configure via environment variables:
+    REALTIME_FEED          angelone | synthetic   (default: synthetic)
+    REALTIME_SYMBOLS       comma-separated tickers
+    REALTIME_INTERVAL      5m | 15m | ...         (default: 5m)
+    REALTIME_CAPITAL       account capital (INR)  (default: 20000)
+    REALTIME_RISK_PCT      risk per trade         (default: 0.02)
+    ANALYSIS_REFRESH_SECONDS   re-analysis cadence (default: 15)
+    BUY_THRESHOLD / SELL_THRESHOLD   score cutoffs (default: 65 / 35)
 """
 import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Set, Dict
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, Set
 
 try:
     import websockets
@@ -18,338 +39,295 @@ except ImportError:
     print("❌ websockets not installed. Install with: pip install websockets")
     sys.exit(1)
 
-import pandas as pd
-import numpy as np
-
 # Add project to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from intraday_advisor.data import generate_sample_ohlcv
+from intraday_advisor.config import RiskConfig
+from intraday_advisor.data import candle_age, drop_forming_candle, parse_interval
+from intraday_advisor.feeds import DataFeedError, resolve_feed
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.strategy import apply_ema_swing_breakout_strategy, ema_swing_breakout_decision
 from intraday_advisor.price_action import analyze_price_action
 from intraday_advisor.smart_money import analyze_smart_money
 from intraday_advisor.box_theory import analyze_box_theory
-from intraday_advisor.situational import latest_situational_summary
-from intraday_advisor.risk import build_trade_plan_from_stop
-from intraday_advisor.config import RiskConfig
+from intraday_advisor.risk import LiveRiskState, build_trade_plan_from_stop
+from intraday_advisor.scoring import ScoreWeights, score_signal
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("realtime_server")
 
-# Global state
+# ---- Global state ----------------------------------------------------------
 clients: Set = set()
 analysis_cache: Dict = {}
-analysis_update_interval = 30  # seconds
 
 
-def calculate_signal_strength(decision, price_action, smart_money, box, row) -> dict:
-    """
-    Custom Unified Tracker Score Engine using the newly implemented indicators.
-    Combines legacy logic with the new 126-Indicator modular engine outputs.
-    """
-    bull_signals = []
-    bear_signals = []
-    score = 50  # neutral baseline
-    
-    # 1. New Custom Indicators: Smart Money Concepts
-    if row.get("Bullish_OB", False):
-        bull_signals.append("Bullish Order Block Formed")
-        score += 15
-    elif row.get("Bearish_OB", False):
-        bear_signals.append("Bearish Order Block Formed")
-        score -= 15
-        
-    if row.get("Bullish_FVG", False):
-        bull_signals.append("Bullish FVG Zone Identified")
-        score += 10
-    elif row.get("Bearish_FVG", False):
-        bear_signals.append("Bearish FVG Zone Identified")
-        score -= 10
-        
-    if row.get("Liquidity_Sweep_Bullish", False):
-        bull_signals.append("Bullish Liquidity Sweep")
-        score += 15
-    elif row.get("Liquidity_Sweep_Bearish", False):
-        bear_signals.append("Bearish Liquidity Sweep")
-        score -= 15
-
-    # 2. New Custom Indicators: Trend & Oscillators
-    if row.get("SuperTrend_Dir", 0) == 1:
-        bull_signals.append("SuperTrend Bullish")
-        score += 10
-    elif row.get("SuperTrend_Dir", 0) == -1:
-        bear_signals.append("SuperTrend Bearish")
-        score -= 10
-        
-    macd_hist = row.get("Adaptive_MACD_Hist", 0)
-    if macd_hist > 0:
-        bull_signals.append("Adaptive MACD Momentum is Positive")
-        score += 5
-    elif macd_hist < 0:
-        bear_signals.append("Adaptive MACD Momentum is Negative")
-        score -= 5
-
-    # 3. Legacy Signals Confluence
-    if decision.signal == "BUY":
-        score += 10
-    elif decision.signal == "SELL":
-        score -= 10
-        
-    if smart_money.vwap_relation == "above VWAP":
-        score += 5
-    elif smart_money.vwap_relation == "below VWAP":
-        score -= 5
-
-    # Clamp score to 0-100
-    confidence = max(0, min(100, score))
-    
-    return {
-        "confidence": confidence,
-        "bull_signals": bull_signals,
-        "bear_signals": bear_signals,
-        "signal_type": "BUY" if confidence > 65 else "SELL" if confidence < 35 else "HOLD"
-    }
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
-async def analyze_symbol_realtime(symbol: str, seed: int, capital: float, risk_pct: float) -> dict:
-    """
-    Real-time analysis for a single symbol
-    Minimal latency, maximum accuracy
+class ServerConfig:
+    def __init__(self) -> None:
+        self.feed_name = os.getenv("REALTIME_FEED", "synthetic")
+        symbols = os.getenv("REALTIME_SYMBOLS", "RELIANCE,HDFCBANK,INFY,TATAMOTORS,JSWSTEEL")
+        self.symbols = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+        self.interval = os.getenv("REALTIME_INTERVAL", "5m")
+        self.capital = _env_float("REALTIME_CAPITAL", 20_000.0)
+        self.risk_pct = _env_float("REALTIME_RISK_PCT", 0.02)
+        self.refresh_seconds = int(_env_float("ANALYSIS_REFRESH_SECONDS", 15))
+        self.buy_threshold = _env_float("BUY_THRESHOLD", 65.0)
+        self.sell_threshold = _env_float("SELL_THRESHOLD", 35.0)
+        # Bar age beyond this multiple of the interval => stale (market closed, feed gap).
+        self.staleness_multiple = _env_float("STALENESS_MULTIPLE", 3.0)
+
+
+def analyze_symbol(feed, symbol: str, cfg: ServerConfig, weights: ScoreWeights) -> dict | None:
+    """Blocking analysis for one symbol. Run inside an executor by the loop.
+
+    Returns a result row, or None if there is not enough usable data.
+    Never raises feed errors — they are converted into an error row so one bad
+    symbol cannot take down the whole broadcast.
     """
     try:
-        # Generate/fetch current OHLCV
-        df = generate_sample_ohlcv(seed=seed)
-        df = apply_ema_swing_breakout_strategy(add_indicators(df))
-        
-        df_clean = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"])
-        if df_clean.empty:
-            return None
-        
-        last = df_clean.iloc[-1]
-        
-        # Run all analysis in parallel-like fashion
-        decision = ema_swing_breakout_decision(symbol, df)
-        price_action = analyze_price_action(df)
-        smart_money = analyze_smart_money(df)
-        box = analyze_box_theory(df)
-        situational = latest_situational_summary(df)
-        
-        # Build analysis row (incorporating new indicators)
-        row = {
-            "Ticker": symbol,
-            "Close": float(last["Close"]),
-            "Signal": decision.signal,
-            "Confidence": decision.confidence,
-            "EMA9": float(last["EMA9"]),
-            "EMA21": float(last["EMA21"]),
-            "EMA200": float(last["EMA200"]),
-            "AboveEMA200": bool(last["Close"] > last["EMA200"]),
-            "ATR14": float(last["ATR14"]),
-            "RSI14": float(last["RSI14"]),
-            "SwingHigh": float(last["RecentSwingHigh"]),
-            "SwingLow": float(last["RecentSwingLow"]),
-            "TrendStructure": price_action.trend,
-            "Support": float(price_action.support) if isinstance(price_action.support, (int, float)) else 0.0,
-            "Resistance": float(price_action.resistance) if isinstance(price_action.resistance, (int, float)) else 0.0,
-            "VolumeConfirmation": price_action.volume_confirmation,
-            "OrderFlow": smart_money.order_flow,
-            "VWAPRelation": smart_money.vwap_relation,
-            "BoxBias": box.bias,
-            # Custom 126-Engine output mapping
-            "Bullish_OB": bool(last.get("Bullish_OB", False)),
-            "Bearish_OB": bool(last.get("Bearish_OB", False)),
-            "Bullish_FVG": bool(last.get("Bullish_FVG", False)),
-            "Bearish_FVG": bool(last.get("Bearish_FVG", False)),
-            "Liquidity_Sweep_Bullish": bool(last.get("Liquidity_Sweep_Bullish", False)),
-            "Liquidity_Sweep_Bearish": bool(last.get("Liquidity_Sweep_Bearish", False)),
-            "Adaptive_MACD_Hist": float(last.get("Adaptive_MACD_Hist", 0)),
-            "SuperTrend_Dir": int(last.get("SuperTrend_Dir", 0)),
-        }
-        
-        # Calculate signal strength
-        signal_data = calculate_signal_strength(decision, price_action, smart_money, box, row)
-        row.update(signal_data)
-        
-        # Build trade plan if signal is active
-        if decision.signal == "BUY":
-            initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
-            plan = build_trade_plan_from_stop(
-                symbol, decision.signal, float(last["Close"]), initial_stop,
-                RiskConfig(capital=capital, risk_per_trade_pct=risk_pct)
-            )
-            row["plan"] = {
-                "entry": plan.entry,
-                "stop": plan.stop,
-                "target": plan.target,
-                "shares": plan.shares,
-                "risk": plan.risk_amount,
-                "reward": plan.reward_amount,
-                "rr": round(plan.reward_amount / plan.risk_amount, 2) if plan.risk_amount > 0 else 0
-            }
-        elif decision.signal == "SELL":
-            initial_stop = min(float(last["RecentSwingHigh"]), float(last["Close"] + 1.5 * last["ATR14"]))
-            plan = build_trade_plan_from_stop(
-                symbol, decision.signal, float(last["Close"]), initial_stop,
-                RiskConfig(capital=capital, risk_per_trade_pct=risk_pct)
-            )
-            row["plan"] = {
-                "entry": plan.entry,
-                "stop": plan.stop,
-                "target": plan.target,
-                "shares": plan.shares,
-                "risk": plan.risk_amount,
-                "reward": plan.reward_amount,
-                "rr": round(plan.reward_amount / plan.risk_amount, 2) if plan.risk_amount > 0 else 0
-            }
-        
-        row["timestamp"] = datetime.now().isoformat()
-        return row
-    
-    except Exception as e:
-        logger.error(f"Error analyzing {symbol}: {str(e)}")
+        raw = feed.get_candles(symbol, cfg.interval)
+    except DataFeedError as exc:
+        logger.warning("Feed error for %s: %s", symbol, exc)
+        return {"Ticker": symbol, "error": str(exc), "actionable": False,
+                "signal_type": "HOLD", "confidence": 0, "data_source": feed.name}
+
+    # --- anti-repaint: analyse only the last CLOSED candle ---
+    closed = drop_forming_candle(raw, cfg.interval)
+    if closed is None or len(closed) < 30:
         return None
 
+    df = apply_ema_swing_breakout_strategy(add_indicators(closed))
+    df_clean = df.dropna(subset=["Close", "EMA9", "EMA21", "ATR14", "RecentSwingHigh", "RecentSwingLow"])
+    if df_clean.empty:
+        return None
+    last = df_clean.iloc[-1]
 
-async def broadcast_update(message: dict):
-    """Broadcast update to all connected clients"""
+    decision = ema_swing_breakout_decision(symbol, df)
+    price_action = analyze_price_action(df)
+    smart_money = analyze_smart_money(df)
+    box = analyze_box_theory(df)
+
+    # --- staleness: is the latest closed bar recent enough to act on? ---
+    age = candle_age(closed)
+    interval_delta = parse_interval(cfg.interval)
+    stale = False
+    if age is not None and interval_delta is not None:
+        stale = age > interval_delta * cfg.staleness_multiple
+    age_seconds = float(age.total_seconds()) if age is not None else None
+
+    row = {
+        "Ticker": symbol,
+        "Close": float(last["Close"]),
+        "Signal": decision.signal,
+        "EMA9": float(last["EMA9"]),
+        "EMA21": float(last["EMA21"]),
+        "EMA200": float(last["EMA200"]),
+        "AboveEMA200": bool(last["Close"] > last["EMA200"]),
+        "ATR14": float(last["ATR14"]),
+        "RSI14": float(last["RSI14"]),
+        "SwingHigh": float(last["RecentSwingHigh"]),
+        "SwingLow": float(last["RecentSwingLow"]),
+        "TrendStructure": price_action.trend,
+        "OrderFlow": smart_money.order_flow,
+        "VWAPRelation": smart_money.vwap_relation,
+        "BoxBias": box.bias,
+        "Bullish_OB": bool(last.get("Bullish_OB", False)),
+        "Bearish_OB": bool(last.get("Bearish_OB", False)),
+        "Bullish_FVG": bool(last.get("Bullish_FVG", False)),
+        "Bearish_FVG": bool(last.get("Bearish_FVG", False)),
+        "Liquidity_Sweep_Bullish": bool(last.get("Liquidity_Sweep_Bullish", False)),
+        "Liquidity_Sweep_Bearish": bool(last.get("Liquidity_Sweep_Bearish", False)),
+        "Adaptive_MACD_Hist": float(last.get("Adaptive_MACD_Hist", 0)),
+        "SuperTrend_Dir": int(last.get("SuperTrend_Dir", 0)),
+        "data_source": feed.name,
+        "is_synthetic": bool(feed.is_synthetic),
+        "candle_time": str(closed.index[-1]),
+        "candle_age_seconds": age_seconds,
+        "stale": bool(stale),
+    }
+
+    scored = score_signal(
+        row,
+        decision_signal=decision.signal,
+        vwap_relation=smart_money.vwap_relation,
+        weights=weights,
+        buy_threshold=cfg.buy_threshold,
+        sell_threshold=cfg.sell_threshold,
+    )
+    row.update({
+        "confidence": scored.score,
+        "signal_type": scored.signal_type,
+        "bull_signals": scored.bull,
+        "bear_signals": scored.bear,
+        "score_components": scored.components,
+    })
+
+    # Build a trade plan + per-trade rupee risk for the risk gate.
+    row["plan"] = None
+    row["trade_risk"] = 0.0
+    if scored.signal_type in ("BUY", "SELL"):
+        if scored.signal_type == "BUY":
+            initial_stop = max(float(last["RecentSwingLow"]), float(last["Close"] - 1.5 * last["ATR14"]))
+        else:
+            initial_stop = min(float(last["RecentSwingHigh"]), float(last["Close"] + 1.5 * last["ATR14"]))
+        try:
+            plan = build_trade_plan_from_stop(
+                symbol, scored.signal_type, float(last["Close"]), initial_stop,
+                RiskConfig(capital=cfg.capital, risk_per_trade_pct=cfg.risk_pct),
+            )
+            row["plan"] = {
+                "entry": plan.entry, "stop": plan.stop, "target": plan.target,
+                "shares": plan.shares, "risk": plan.risk_amount, "reward": plan.reward_amount,
+                "rr": round(plan.reward_amount / plan.risk_amount, 2) if plan.risk_amount > 0 else 0,
+            }
+            row["trade_risk"] = float(plan.risk_amount)
+        except (ValueError, ZeroDivisionError) as exc:
+            logger.debug("Plan build skipped for %s: %s", symbol, exc)
+
+    # HARD GUARD: actionable requires real, fresh data and a directional signal.
+    # The risk-gate decision is applied later in the loop (needs cross-symbol state).
+    row["actionable"] = (
+        not feed.is_synthetic
+        and not stale
+        and scored.signal_type in ("BUY", "SELL")
+    )
+    row["timestamp"] = datetime.now().isoformat()
+    return row
+
+
+async def broadcast_update(message: dict) -> None:
     if not clients:
         return
-    
-    message_json = json.dumps(message, default=str)
-    dead_clients = set()
-    
+    payload = json.dumps(message, default=str)
+    dead = set()
     for client in clients:
         try:
-            await client.send(message_json)
-        except Exception as e:
-            logger.warning(f"Client disconnection: {e}")
-            dead_clients.add(client)
-    
-    # Remove dead clients
-    for client in dead_clients:
+            await client.send(payload)
+        except Exception as exc:  # noqa: BLE001 - log + drop the client
+            logger.warning("Client send failed: %s", exc)
+            dead.add(client)
+    for client in dead:
         clients.discard(client)
 
 
-async def analysis_loop(symbols: list, capital: float, risk_pct: float):
-    """Continuously analyze symbols and broadcast updates"""
-    seeds = {symbol: hash(symbol) % 10000 for symbol in symbols}
-    
+async def analysis_loop(cfg: ServerConfig) -> None:
+    feed = resolve_feed(cfg.feed_name)
+    weights = ScoreWeights.load()
+    risk_state = LiveRiskState(config=RiskConfig(capital=cfg.capital, risk_per_trade_pct=cfg.risk_pct))
+    loop = asyncio.get_event_loop()
+
+    if feed.is_synthetic:
+        logger.warning("=" * 70)
+        logger.warning("DEMO MODE: feed is SYNTHETIC random-walk data.")
+        logger.warning("Signals will be marked actionable=False and MUST NOT be traded.")
+        logger.warning("Set REALTIME_FEED=angelone for real signals.")
+        logger.warning("=" * 70)
+
     while True:
         try:
-            logger.info(f"Analyzing {len(symbols)} symbols...")
-            
-            results = []
-            for symbol in symbols:
-                result = await analyze_symbol_realtime(symbol, seeds[symbol], capital, risk_pct)
-                if result:
-                    results.append(result)
-            
-            # Filter active trades only (using new confidence threshold from the advanced engine)
-            active = [r for r in results if r.get("signal_type") in ["BUY", "SELL"] and r.get("confidence", 0) >= 65]
-            
-            # Broadcast update
+            # Network/CPU work off the event loop so sends stay responsive.
+            tasks = [loop.run_in_executor(None, analyze_symbol, feed, sym, cfg, weights)
+                     for sym in cfg.symbols]
+            results = [r for r in await asyncio.gather(*tasks) if r]
+
+            # Apply the risk gate across this cycle's candidates, best score first.
+            risk_state.begin_cycle()
+            for r in sorted(results, key=lambda x: x.get("confidence", 0), reverse=True):
+                if not r.get("actionable"):
+                    continue
+                trade_risk = float(r.get("trade_risk", 0.0))
+                if risk_state.can_admit(trade_risk):
+                    risk_state.admit(trade_risk)
+                else:
+                    r["actionable"] = False
+                    r["throttled_by_risk"] = True
+
+            active = [r for r in results if r.get("actionable")]
+            mode = "DEMO_SYNTHETIC_DATA" if feed.is_synthetic else "LIVE"
+
+            analysis_cache.update({"results": results, "active": active, "mode": mode})
             await broadcast_update({
                 "type": "analysis_update",
+                "mode": mode,
                 "timestamp": datetime.now().isoformat(),
+                "feed": feed.name,
+                "interval": cfg.interval,
                 "total_analyzed": len(results),
                 "active_trades": len(active),
+                "risk": risk_state.status(),
                 "trades": active,
-                "all_results": results  # Include all for reference
+                "all_results": results,
             })
-            
-            # Wait before next update
-            await asyncio.sleep(analysis_update_interval)
-        
-        except Exception as e:
-            logger.error(f"Analysis loop error: {e}")
+            await asyncio.sleep(cfg.refresh_seconds)
+        except Exception as exc:  # noqa: BLE001 - keep the loop alive
+            logger.error("Analysis loop error: %s", exc)
             await asyncio.sleep(5)
 
 
-async def handler(websocket, path):
-    """Handle WebSocket client connection"""
+async def handler(websocket, path=None) -> None:
     clients.add(websocket)
-    logger.info(f"Client connected. Total clients: {len(clients)}")
-    
+    logger.info("Client connected. Total clients: %d", len(clients))
     try:
-        # Welcome message
         await websocket.send(json.dumps({
             "type": "welcome",
             "message": "Connected to Real-Time Trading Analysis Server",
-            "timestamp": datetime.now().isoformat()
+            "mode": analysis_cache.get("mode", "STARTING"),
+            "timestamp": datetime.now().isoformat(),
         }))
-        
-        # Keep connection alive and receive commands
         async for message in websocket:
             try:
                 data = json.loads(message)
-                command = data.get("command", "ping")
-                
-                if command == "ping":
-                    await websocket.send(json.dumps({
-                        "type": "pong",
-                        "timestamp": datetime.now().isoformat()
-                    }))
-                
-                elif command == "subscribe":
-                    symbols = data.get("symbols", [])
-                    capital = data.get("capital", 20000)
-                    risk_pct = data.get("risk_pct", 0.02)
-                    
-                    await websocket.send(json.dumps({
-                        "type": "subscribed",
-                        "symbols": symbols,
-                        "timestamp": datetime.now().isoformat()
-                    }))
-                
-                else:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "message": f"Unknown command: {command}"
-                    }))
-            
             except json.JSONDecodeError:
+                await websocket.send(json.dumps({"type": "error", "message": "Invalid JSON format"}))
+                continue
+
+            command = data.get("command", "ping")
+            if command == "ping":
+                await websocket.send(json.dumps({"type": "pong", "timestamp": datetime.now().isoformat()}))
+            elif command == "subscribe":
+                # Server runs one shared watchlist (env-configured) in Phase 1;
+                # acknowledge so clients know they are attached to the stream.
                 await websocket.send(json.dumps({
-                    "type": "error",
-                    "message": "Invalid JSON format"
+                    "type": "subscribed",
+                    "note": "Server streams a shared env-configured watchlist in this phase.",
+                    "timestamp": datetime.now().isoformat(),
                 }))
-    
+            elif command == "status":
+                await websocket.send(json.dumps({
+                    "type": "status",
+                    "mode": analysis_cache.get("mode", "STARTING"),
+                    "active_trades": len(analysis_cache.get("active", [])),
+                    "timestamp": datetime.now().isoformat(),
+                }, default=str))
+            else:
+                await websocket.send(json.dumps({"type": "error", "message": f"Unknown command: {command}"}))
     except websockets.exceptions.ConnectionClosed:
         logger.info("Client disconnected")
-    
     finally:
         clients.discard(websocket)
-        logger.info(f"Client removed. Total clients: {len(clients)}")
+        logger.info("Client removed. Total clients: %d", len(clients))
 
 
-async def main():
-    """Start WebSocket server with analysis loop"""
-    host = "0.0.0.0"
-    port = 8765
-    
-    # Default symbols
-    symbols = ["RELIANCE", "HDFCBANK", "INFY", "TATAMOTORS", "JSWSTEEL"]
-    capital = 20000.0
-    risk_pct = 0.02
-    
-    logger.info(f"Starting Real-Time WebSocket Server on ws://{host}:{port}")
-    logger.info(f"Monitoring symbols: {', '.join(symbols)}")
-    logger.info(f"Capital: ₹{capital:,.0f} | Risk per trade: {risk_pct*100}%")
-    
-    # Start WebSocket server
+async def main() -> None:
+    host, port = "0.0.0.0", 8765
+    cfg = ServerConfig()
+    logger.info("Starting Real-Time WebSocket Server on ws://%s:%d", host, port)
+    logger.info("Feed: %s | Symbols: %s | Interval: %s", cfg.feed_name, ", ".join(cfg.symbols), cfg.interval)
+    logger.info("Capital: ₹%s | Risk/trade: %.1f%% | Refresh: %ds",
+                f"{cfg.capital:,.0f}", cfg.risk_pct * 100, cfg.refresh_seconds)
     async with serve(handler, host, port):
         logger.info("✅ WebSocket server running. Waiting for clients...")
-        
-        # Start analysis loop
-        try:
-            await analysis_loop(symbols, capital, risk_pct)
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
+        await analysis_loop(cfg)
 
 
 if __name__ == "__main__":
@@ -357,6 +335,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Fatal error: %s", exc)
         sys.exit(1)

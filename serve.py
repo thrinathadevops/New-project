@@ -89,9 +89,10 @@ def analyse(symbol: str, seed: int, capital: float, risk_pct: float) -> tuple[di
         "FloatPct": 35.0,
         "Sector": "Demo",
     }
-    suggested_action, action_reason = decision_guide(row)
+    suggested_action, action_reason, option_suggestion = decision_guide(row)
     row["SuggestedAction"] = suggested_action
     row["ActionReason"] = action_reason
+    row["OptionSuggestion"] = option_suggestion
     return row, plan
 
 
