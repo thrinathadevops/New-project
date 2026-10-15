@@ -73,17 +73,52 @@ ollama pull llama3.1:8b
 set AGENT_PROVIDER=ollama
 ```
 
-**3. A free-tier hosted model — faster, needs a key.**
+**3. A free-tier hosted model — faster, needs a key.** Both are wired and
+tested.
 
-```bash
-set AGENT_PROVIDER=groq        # console.groq.com
-set AGENT_API_KEY=...
-# or
-set AGENT_PROVIDER=gemini      # aistudio.google.com
-set AGENT_API_KEY=...
+Put the keys in `.env` (which **is** now loaded — it never was before):
+
+```ini
+AGENT_PROVIDER=groq          # or gemini
+GROQ_API_KEY=gsk_...         # console.groq.com
+GEMINI_API_KEY=...           # aistudio.google.com
 ```
 
-All speak the OpenAI chat-completions shape, so one class covers them.
+Each provider reads **its own** key, so both can sit in `.env` and switching is
+a one-word change. `AGENT_API_KEY` overrides whichever is active.
+
+Check it with `python ledger_cli.py doctor --test-agent`.
+
+### Model names go stale — this heals itself
+
+Both providers had already retired the model names I first shipped
+(`llama-3.3-70b-versatile` gone from Groq; `gemini-2.0-flash` never existed).
+So the agent now:
+
+1. uses a current default (`openai/gpt-oss-20b`, `gemini-flash-lite-latest`);
+2. on a 400/404, reads the replacement the provider **names in its own error**
+   ("please use models/X") and retries;
+3. failing that, lists `/models` and picks the best available chat model;
+4. on 429/503 (free tiers overload per-model), retries once then falls through
+   to the next preferred model.
+
+Two details worth knowing, both found by testing rather than reading docs:
+
+- **Groq's gpt-oss models spend completion tokens on hidden reasoning before
+  answering.** At `max_tokens=400` the entire budget went to reasoning and the
+  reply came back empty — which looks exactly like a parse failure. The budget
+  is now 1500, and an empty answer falls back to the `reasoning` field.
+- **Gemini's larger flash models 503 constantly on the free tier.**
+  `gemini-flash-lite-latest` is the default for that reason: a structured risk
+  verdict does not need the bigger model, it needs an answer.
+
+### Cost control
+
+An LLM verdict is cached per **candle**, not per refresh — keyed on
+(index, bar_time, direction, score band, data mode). Without that, a 10-second
+refresh would make 12 calls a minute, burn a free tier within the hour, add
+latency to every snapshot, and keep re-asking a question whose inputs had not
+moved. A 5-minute candle means roughly 2 calls per 5 minutes.
 
 ### Configuration
 

@@ -299,14 +299,43 @@ def test_combine_with_nothing_is_proceed():
 
 # ------------------------------------------------------------- LLM plumbing --
 
-def test_llm_without_a_key_degrades_to_caution_not_proceed():
-    """A silently-succeeding safety layer is decoration."""
-    agent = LLMAgent(provider="groq", api_key="")
+def test_llm_without_a_key_degrades_to_caution_not_proceed(monkeypatch):
+    """A silently-succeeding safety layer is decoration.
+
+    Env is cleared explicitly: once real keys live in .env this test would
+    otherwise pass or fail depending on the developer's machine, which is no
+    test at all.
+    """
+    # The loader must be stubbed as well as the vars cleared: resolve_api_key
+    # calls load_env(), which would read the real .env straight back in.
+    monkeypatch.setattr("intraday_advisor.envfile.load_env", lambda *a, **k: False)
+    for name in ("AGENT_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    agent = LLMAgent(provider="groq")
     verdict = agent.review(a_brief())
 
     assert verdict.stance == CAUTION
     assert verdict.degraded is True
     assert "key" in (verdict.error or "").lower()
+
+
+def test_api_key_resolves_per_provider(monkeypatch):
+    """Several providers can be configured at once, so each reads its own key
+    and AGENT_API_KEY overrides whichever is active."""
+    from intraday_advisor.agents.llm import resolve_api_key
+
+    monkeypatch.setattr("intraday_advisor.envfile.load_env", lambda *a, **k: False)
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+
+    assert resolve_api_key("groq") == "groq-key"
+    assert resolve_api_key("gemini") == "gemini-key"
+    assert resolve_api_key("nosuch") == ""
+
+    monkeypatch.setenv("AGENT_API_KEY", "override")
+    assert resolve_api_key("groq") == "override"
 
 
 def test_llm_unreachable_endpoint_degrades_to_caution():

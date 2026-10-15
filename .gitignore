@@ -1,4 +1,9 @@
+# .env and ANY sidecar of it (.env.bak, .env.local, .env.backup ...).
+# A plain `.env` line matches only that exact name, so a backup file
+# would have been committable with every secret in it.
 .env
+.env.*
+*.env.bak
 .venv/
 __pycache__/
 *.py[cod]

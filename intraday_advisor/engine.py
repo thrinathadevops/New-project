@@ -148,6 +148,7 @@ class Engine:
     _chart_cache: dict = field(default_factory=dict, repr=False)
     _chart_fetched_at: dict = field(default_factory=dict, repr=False)
     _regime_cache: dict = field(default_factory=dict, repr=False)
+    _agent_cache: dict = field(default_factory=dict, repr=False)
     _regime_fetched_at: float = field(default=0.0, repr=False)
     _agents: Any = field(default=None, repr=False)
     _costs: Any = None
@@ -483,11 +484,29 @@ class Engine:
             "minutes_to_square_off": minutes_to_square_off(),
         }
         for signal in signals:
+            # Key on what actually changes the answer. Without this an LLM
+            # agent is called twice every refresh -- 12 calls a minute at a
+            # 10-second interval -- which burns a free tier in an hour, adds
+            # latency to every snapshot, and re-asks a question whose inputs
+            # have not moved. The signal only changes on a new closed candle.
+            cache_key = (
+                signal.get("index"),
+                signal.get("bar_time"),
+                signal.get("direction"),
+                int((signal.get("score") or 0) // 5),   # ignore 1-point jitter
+                bool((signal.get("plan") or {}).get("affordable", True)),
+                snapshot_so_far["mode"],
+            )
+            cached = self._agent_cache.get(signal["index"])
+            if cached and cached[0] == cache_key:
+                signal["agent"] = cached[1]
+                continue
             try:
                 signal["agent"] = review_signal(
                     signal, snapshot_so_far, signal.get("regime"),
                     agents=self._agents,
                 )
+                self._agent_cache[signal["index"]] = (cache_key, signal["agent"])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Agent review failed for %s: %s", signal["index"], exc)
                 signal["agent"] = {"stance": "CAUTION", "summary": f"Review failed: {exc}",

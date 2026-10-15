@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from intraday_advisor.envfile import load_env
 from intraday_advisor.ledger import (
     DEFAULT_LEDGER_PATH,
     by_dimension,
@@ -280,6 +281,74 @@ def cmd_demo(args) -> int:
     return 0
 
 
+
+def cmd_doctor(args) -> int:
+    """Check configuration and say plainly what is and is not working."""
+    from intraday_advisor.agents import agent_status
+    from intraday_advisor.envfile import describe_config
+
+    report = describe_config()
+    print("=" * 66)
+    print("CONFIGURATION")
+    print("=" * 66)
+    print(f"  .env file   {report['env_file']}")
+    print(f"  found       {'yes' if report['env_file_found'] else 'NO'}")
+    print()
+
+    for name, info in report["settings"].items():
+        mark = "OK " if info["set"] else ("!! " if info["critical"] else "-- ")
+        detail = f"{info['length']} chars" if info["set"] else "not set"
+        print(f"  {mark}{name:24} {detail:<14} {info['label']}")
+
+    if report["problems"]:
+        print()
+        print("PROBLEMS IN .env")
+        print("-" * 66)
+        for problem in report["problems"]:
+            print(f"  line {problem['line']}: {problem['problem']}")
+            print(f"    {problem['text']}")
+            print(f"    fix: {problem['fix']}")
+
+    print()
+    print("BROKER")
+    print("-" * 66)
+    print(f"  {report['summary']}")
+
+    status = agent_status()
+    print()
+    print("AGENT")
+    print("-" * 66)
+    print(f"  {status['detail']}")
+    if status.get("llm_active") and not status.get("llm_ready"):
+        print("  Free options:")
+        for name, spec in status["presets"].items():
+            key = "needs a key" if spec["needs_key"] else "no key needed"
+            print(f"    {name:10} ({key}) {spec['note']}")
+
+    if args.test_agent and status.get("llm_ready"):
+        print()
+        print("  Testing the agent with a synthetic trade ...")
+        from intraday_advisor.agents.base import TradeBrief
+        from intraday_advisor.agents.llm import LLMAgent
+        probe = TradeBrief(
+            index="NIFTY", direction="CALL", score=68, contract="23000 CE",
+            entry_premium=100.0, target_premium=125.0, stop_premium=80.0,
+            lots=1, risk_amount=1500.0, risk_pct_of_capital=0.05, net_rr=1.3,
+            breakeven=101.3, cost_drag=0.013, affordable=True,
+            available_capital=30000.0, regime="TRENDING_UP", regime_bias="UP",
+            regime_conviction=60, vix=14.0, vix_level="normal",
+            market_open=True, data_is_live=True, graded_trades=0,
+        )
+        verdict = LLMAgent(provider=status["provider"], timeout=40.0).review(probe)
+        state = "FAILED" if verdict.degraded else "working"
+        print(f"    {state}: {verdict.model} responded in {verdict.latency_ms}ms "
+              f"with {verdict.stance}")
+        if verdict.error:
+            print(f"    error: {verdict.error[:220]}")
+    print("=" * 66)
+    return 0 if report["broker_ready"] else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Signal ledger: record signals, grade outcomes, measure the edge.",
@@ -341,6 +410,13 @@ def main(argv=None) -> int:
     demo = subparsers.add_parser("demo", help="end-to-end proof on synthetic data")
     demo.set_defaults(func=cmd_demo)
 
+    doctor = subparsers.add_parser(
+        "doctor", help="check .env, broker credentials and the agent")
+    doctor.add_argument("--test-agent", action="store_true",
+                        help="make one real call to the configured LLM agent")
+    doctor.set_defaults(func=cmd_doctor)
+
+    load_env()
     args = parser.parse_args(argv)
     return args.func(args)
 

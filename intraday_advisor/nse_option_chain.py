@@ -173,6 +173,7 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
     # ── 2. Try Angel One live LTP ──────────────────────────────────────────
     df_oi      = pd.DataFrame()
     data_source = "Synthetic (estimated)"
+    live_error: str | None = None
 
     try:
         api_key     = os.getenv("ANGEL_ONE_API_KEY", "")
@@ -218,13 +219,19 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
                     df_oi = pd.DataFrame(rows)
                     has_oi = (sum(r["ce_oi"] + r["pe_oi"] for r in rows) > 0)
                     data_source = "Angel One live (LTP + OI)" if has_oi else "Angel One LTP (live)"
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Recorded, not swallowed. A bare `pass` here made a login failure look
+        # exactly like a closed market: both produced "Estimated" with no clue
+        # which. That is the difference between "wait for 09:15" and "your
+        # credentials are not loading".
+        live_error = f"{type(exc).__name__}: {exc}"
 
     # ── 3. Fallback synthetic OI ───────────────────────────────────────────
     if df_oi.empty or df_oi["ce_ltp"].sum() == 0:
         df_oi       = _build_synthetic_oi(strikes, spot)
         data_source = "Estimated (market closed or API unavailable)"
+        if live_error:
+            data_source = "Estimated (broker call failed)"
 
     # ── 4. PCR & Max Pain on OI ───────────────────────────────────────────
     total_pe_oi = max(df_oi["pe_oi"].sum(), 1)
@@ -313,6 +320,7 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
         "atm_ce_oi":    atm_ce_oi,
         "atm_pe_oi":    atm_pe_oi,
         "data_source":  data_source,
+        "live_error":   live_error,
         "reasons":      reasons,
         "df":           df_oi,
         "error":        None,

@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 
 from intraday_advisor.agents.base import (
     CAUTION,
@@ -70,17 +72,96 @@ PRESETS = {
     },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-20b",
         "needs_key": True,
         "note": "Free tier, very fast. Key from console.groq.com",
     },
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-flash-lite-latest",
         "needs_key": True,
         "note": "Free tier. Key from aistudio.google.com",
     },
 }
+
+
+def resolve_api_key(provider: str) -> str:
+    """Find the key for one provider, so several can be configured at once.
+
+    Order: ``AGENT_API_KEY`` (an explicit override for whichever provider is
+    active) then ``<PROVIDER>_API_KEY``. Keeping per-provider names means
+    GROQ_API_KEY and GEMINI_API_KEY can both sit in .env and switching provider
+    is a one-word change rather than a copy-paste of secrets.
+    """
+    from intraday_advisor.envfile import load_env
+
+    load_env()
+    explicit = os.getenv("AGENT_API_KEY")
+    if explicit:
+        return explicit
+    return os.getenv(f"{provider.upper()}_API_KEY", "")
+
+
+
+# Preferred chat models per provider, best-first. Hosted providers retire model
+# names without warning -- a stale default is how this integration broke the
+# first time -- so when the configured model is rejected the agent asks the
+# endpoint what it actually has and picks the first match from here.
+
+_SUGGESTED = re.compile(r"use\s+(?:models/)?([A-Za-z0-9._\-]+)", re.I)
+
+
+def _suggested_model(error_body: str) -> str | None:
+    """Pull the replacement model name out of a provider's own error message."""
+    if not error_body:
+        return None
+    match = _SUGGESTED.search(error_body)
+    if not match:
+        return None
+    candidate = match.group(1).strip().rstrip(".,")
+    # Guard against matching ordinary prose like "use the Interactions API".
+    return candidate if any(c.isdigit() for c in candidate) else None
+
+
+MODEL_PREFERENCES = {
+    "groq": ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"),
+    # flash-lite first on purpose: the larger flash models return 503
+    # ("experiencing high demand") on the free tier often enough that they are
+    # not dependable for a check that runs every refresh. A structured risk
+    # verdict does not need the bigger model; it needs an answer.
+    "gemini": ("gemini-flash-lite-latest", "gemini-3.8-flash", "gemini-flash-latest"),
+    "ollama": ("llama3.1:8b", "llama3:8b", "qwen2.5:7b"),
+    "lmstudio": (),
+}
+
+# Model ids are not chat models just because they are listed.
+_NON_CHAT = ("whisper", "tts", "embed", "guard", "orpheus", "image", "vision-only")
+
+
+def discover_model(base_url: str, api_key: str, provider: str,
+                   timeout: float = 8.0) -> str | None:
+    """Ask the endpoint which models exist and choose a usable chat model."""
+    try:
+        import requests
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        response = requests.get(f"{base_url}/models", headers=headers, timeout=timeout)
+        response.raise_for_status()
+        available = {
+            str(m.get("id", "")).removeprefix("models/")
+            for m in response.json().get("data", [])
+        }
+    except Exception:  # noqa: BLE001 - discovery is best-effort by definition
+        return None
+
+    for preferred in MODEL_PREFERENCES.get(provider, ()):
+        if preferred in available:
+            return preferred
+    # Nothing preferred: take any plausible chat model rather than give up.
+    for candidate in sorted(available):
+        if not any(bad in candidate.lower() for bad in _NON_CHAT):
+            return candidate
+    return None
+
 
 SYSTEM_PROMPT = """\
 You are a risk reviewer for an intraday Indian index-options trading system.
@@ -232,7 +313,7 @@ class LLMAgent:
         self.name = f"llm:{provider}"
         self.base_url = (base_url or preset.get("base_url") or "").rstrip("/")
         self.model = model or preset.get("model") or "unknown"
-        self.api_key = api_key or ""
+        self.api_key = api_key or resolve_api_key(provider)
         self.timeout = timeout
         self.needs_key = bool(preset.get("needs_key", True))
 
@@ -281,17 +362,83 @@ class LLMAgent:
             # Zero so the same brief tends to produce the same verdict: a risk
             # check that changes its mind at random cannot be tested.
             "temperature": 0,
-            "max_tokens": 400,
+            # Generous because reasoning models (Groq's gpt-oss family) spend
+            # completion tokens on hidden reasoning BEFORE emitting content. At
+            # 400 the whole budget went to reasoning and the reply came back
+            # empty, which looked like a parse failure rather than a truncation.
+            "max_tokens": 1500,
         }
 
-        try:
-            response = requests.post(
+        def call(model_name: str):
+            payload["model"] = model_name
+            return requests.post(
                 f"{self.base_url}/chat/completions",
                 headers=headers, json=payload, timeout=self.timeout,
             )
-            response.raise_for_status()
+
+        try:
+            response = call(self.model)
+
+            # 404/400 here usually means the model id is wrong, not that the
+            # service is down. Ask what exists and retry once: hosted providers
+            # retire model names regularly and a stale default should not take
+            # the reviewer offline.
+            if response.status_code in (400, 404):
+                # Providers often name the successor in the error body
+                # ("no longer available ... please use models/X"). Believe them
+                # before falling back to listing everything.
+                found = _suggested_model(response.text) or discover_model(
+                    self.base_url, self.api_key, self.provider)
+                if found and found != self.model:
+                    logger_note = f"model {self.model!r} rejected; using {found!r}"
+                    self.model = found
+                    verdict.model = found
+                    response = call(found)
+                    verdict.supports.append(logger_note)
+
+            # 429/503 are load, not misconfiguration. Free tiers hit them
+            # routinely, so one short retry is worth it -- but only one: a
+            # reviewer that stalls the refresh loop is worse than one that
+            # abstains.
+            if response.status_code in (429, 503):
+                time.sleep(1.5)
+                response = call(self.model)
+
+                # Still saturated: try the next preferred model rather than
+                # abstaining. Free tiers overload per-model, not per-account.
+                if response.status_code in (429, 503):
+                    for alternative in MODEL_PREFERENCES.get(self.provider, ()):
+                        if alternative == self.model:
+                            continue
+                        response = call(alternative)
+                        if response.ok:
+                            verdict.supports.append(
+                                f"{self.model!r} was overloaded; used "
+                                f"{alternative!r} instead"
+                            )
+                            self.model = alternative
+                            verdict.model = alternative
+                            break
+
+            if not response.ok:
+                # The body explains the failure; status alone does not.
+                raise RuntimeError(
+                    f"HTTP {response.status_code}: {response.text[:300]}"
+                )
             body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            message = choice.get("message", {})
+            content = (message.get("content") or "").strip()
+            if not content:
+                # Reasoning models put their chain of thought in a separate
+                # field; if the answer is empty the JSON may still be in there.
+                content = (message.get("reasoning") or "").strip()
+            if not content:
+                raise RuntimeError(
+                    f"Empty reply (finish_reason={choice.get('finish_reason')}). "
+                    f"If this says 'length', the token budget was spent on "
+                    f"reasoning before any answer was produced."
+                )
         except Exception as exc:  # noqa: BLE001 - every failure degrades the same way
             verdict.stance = CAUTION
             verdict.degraded = True

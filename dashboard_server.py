@@ -42,6 +42,7 @@ except ImportError:  # pragma: no cover - dependency guard
     print("websockets is required:  python -m pip install websockets", file=sys.stderr)
     raise SystemExit(1)
 
+from intraday_advisor.envfile import load_env
 from intraday_advisor.engine import Engine
 from intraday_advisor.ledger.schema import DEFAULT_LEDGER_PATH
 from intraday_advisor.positions import close_position, open_position
@@ -359,6 +360,9 @@ def main(argv=None) -> int:
                         help="do not write signals to the ledger")
     parser.add_argument("--db", default=str(DEFAULT_LEDGER_PATH))
     args = parser.parse_args(argv)
+
+    # Credentials and agent keys live in .env; nothing read them before.
+    load_env()
 
     try:
         asyncio.run(main_async(args))

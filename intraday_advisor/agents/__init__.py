@@ -38,6 +38,7 @@ from intraday_advisor.agents.base import (
 )
 from intraday_advisor.agents.llm import PRESETS, LLMAgent
 from intraday_advisor.agents.rules import RuleAgent
+from intraday_advisor.envfile import load_env
 
 __all__ = [
     "PROCEED", "CAUTION", "VETO", "PRESETS",
@@ -60,6 +61,9 @@ def build_agents(
     ``none`` — it costs nothing, cannot fail, and catches the mistakes that
     actually drain accounts.
     """
+    # Read .env first: without it AGENT_PROVIDER and the keys are invisible
+    # and the stack silently falls back to rules-only.
+    load_env()
     choice = (provider or os.getenv("AGENT_PROVIDER", "rules")).strip().lower()
     if choice in ("none", "off", "disabled"):
         return []
@@ -72,7 +76,7 @@ def build_agents(
         provider=choice,
         model=model or os.getenv("AGENT_MODEL"),
         base_url=base_url or os.getenv("AGENT_BASE_URL"),
-        api_key=api_key or os.getenv("AGENT_API_KEY"),
+        api_key=api_key,          # None -> resolve_api_key() per provider
     ))
     return agents
 
@@ -116,6 +120,7 @@ def agent_status(provider: str | None = None) -> dict:
     Surfaced in the dashboard so a misconfigured agent is visible rather than
     silently absent.
     """
+    load_env()
     choice = (provider or os.getenv("AGENT_PROVIDER", "rules")).strip().lower()
     status = {
         "provider": choice,
@@ -144,7 +149,6 @@ def agent_status(provider: str | None = None) -> dict:
         provider=choice,
         model=os.getenv("AGENT_MODEL"),
         base_url=os.getenv("AGENT_BASE_URL"),
-        api_key=os.getenv("AGENT_API_KEY"),
     )
     ready, why = agent.available()
     status.update({
