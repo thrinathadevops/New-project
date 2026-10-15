@@ -151,6 +151,7 @@ KNOWN_SETTINGS = {
     "ANGEL_ONE_CLIENT_CODE": ("Angel One client code", True),
     "ANGEL_ONE_PIN": ("Angel One PIN", True),
     "ANGEL_ONE_TOTP_SECRET": ("Angel One TOTP secret", True),
+    "OPENROUTER_API_KEY": ("OpenRouter key (one key, many free models)", False),
     "GROQ_API_KEY": ("Groq API key (free-tier agent)", False),
     "GEMINI_API_KEY": ("Gemini API key (free-tier agent)", False),
     "AGENT_API_KEY": ("Generic agent API key override", False),

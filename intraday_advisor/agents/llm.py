@@ -70,6 +70,23 @@ PRESETS = {
         "needs_key": False,
         "note": "Local, free. Start the LM Studio server.",
     },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        # ":free" models cost nothing. The exact ids churn, so this is only a
+        # starting guess -- discover_model() confirms against live pricing.
+        # OpenRouter's auto-router across free models: it picks whichever is
+        # up, which is the right default when every hardcoded id in this
+        # file had already been retired within weeks of being written.
+        "model": "openrouter/free",
+        "needs_key": True,
+        "note": "One key, many models, several genuinely free. Key from openrouter.ai/keys",
+        # OpenRouter asks callers to identify themselves; it is also how your
+        # usage shows up on their dashboard.
+        "headers": {
+            "HTTP-Referer": "https://github.com/local/intraday-advisor",
+            "X-Title": "Intraday Options Desk",
+        },
+    },
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "model": "openai/gpt-oss-20b",
@@ -124,6 +141,15 @@ def _suggested_model(error_body: str) -> str | None:
 
 
 MODEL_PREFERENCES = {
+    # OpenRouter: free tiers only. Ordered by how well they follow a
+    # "return only JSON" instruction, which is the whole job here.
+    "openrouter": (
+        "openrouter/free",                          # auto-router, survives churn
+        "google/gemma-4-31b-it:free",               # instruction-tuned
+        "nvidia/nemotron-3-super-120b-a12b:free",
+        "nvidia/nemotron-3.5-lightning:free",       # fast
+        "thinkingmachines/inkling:free",
+    ),
     "groq": ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"),
     # flash-lite first on purpose: the larger flash models return 503
     # ("experiencing high demand") on the free tier often enough that they are
@@ -135,23 +161,43 @@ MODEL_PREFERENCES = {
 }
 
 # Model ids are not chat models just because they are listed.
-_NON_CHAT = ("whisper", "tts", "embed", "guard", "orpheus", "image", "vision-only")
+_NON_CHAT = (
+    "whisper", "tts", "embed", "guard", "orpheus", "image", "vision-only",
+    # Free does not mean suitable: these are audio, classifier or code-only
+    # models that will not produce a sensible risk verdict.
+    "lyria", "content-safety", "clip", "-code", "laguna", "moderation", "rerank",
+)
 
 
 def discover_model(base_url: str, api_key: str, provider: str,
-                   timeout: float = 8.0) -> str | None:
-    """Ask the endpoint which models exist and choose a usable chat model."""
+                   timeout: float = 8.0, *, free_only: bool | None = None) -> str | None:
+    """Ask the endpoint which models exist and choose a usable chat model.
+
+    On OpenRouter this defaults to **free models only**. The catalogue is
+    hundreds of models, most of them paid, and silently falling back to a
+    billed model because a free id was retired is not an acceptable failure
+    mode for a risk checker that runs all day.
+    """
+    if free_only is None:
+        free_only = provider == "openrouter"
+
     try:
         import requests
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         response = requests.get(f"{base_url}/models", headers=headers, timeout=timeout)
         response.raise_for_status()
-        available = {
-            str(m.get("id", "")).removeprefix("models/")
-            for m in response.json().get("data", [])
-        }
+        entries = response.json().get("data", [])
     except Exception:  # noqa: BLE001 - discovery is best-effort by definition
         return None
+
+    available: set[str] = set()
+    for entry in entries:
+        model_id = str(entry.get("id", "")).removeprefix("models/")
+        if not model_id:
+            continue
+        if free_only and not _is_free(entry, model_id):
+            continue
+        available.add(model_id)
 
     for preferred in MODEL_PREFERENCES.get(provider, ()):
         if preferred in available:
@@ -161,6 +207,26 @@ def discover_model(base_url: str, api_key: str, provider: str,
         if not any(bad in candidate.lower() for bad in _NON_CHAT):
             return candidate
     return None
+
+
+def _is_free(entry: dict, model_id: str) -> bool:
+    """True when a catalogue entry costs nothing to call.
+
+    Trusts the published pricing over the ``:free`` suffix, because the suffix
+    is a naming convention and the pricing is the contract.
+    """
+    pricing = entry.get("pricing") or {}
+    # Absent pricing must NOT read as free. Defaulting the lookup to "0" made
+    # any model with no pricing block look free, which is the precise failure
+    # this function exists to prevent. With no pricing, trust only the suffix.
+    if "prompt" not in pricing and "completion" not in pricing:
+        return model_id.endswith(":free")
+    try:
+        prompt = float(pricing.get("prompt") or 0)
+        completion = float(pricing.get("completion") or 0)
+    except (TypeError, ValueError):
+        return model_id.endswith(":free")
+    return prompt == 0 and completion == 0
 
 
 SYSTEM_PROMPT = """\
@@ -316,6 +382,7 @@ class LLMAgent:
         self.api_key = api_key or resolve_api_key(provider)
         self.timeout = timeout
         self.needs_key = bool(preset.get("needs_key", True))
+        self.extra_headers = dict(preset.get("headers") or {})
 
     def available(self) -> tuple[bool, str]:
         """Whether this agent can run, and why not if it cannot."""
@@ -349,7 +416,7 @@ class LLMAgent:
             verdict.error = "requests not installed"
             return verdict
 
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **self.extra_headers}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 

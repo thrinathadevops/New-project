@@ -426,3 +426,86 @@ def test_brief_from_snapshot_pulls_the_right_fields():
     assert brief.graded_trades == 50
     assert brief.measured_expectancy == 180.0
     assert brief.data_is_live is True
+
+
+# ----------------------------------------------------------- OpenRouter ----
+
+def test_openrouter_preset_is_configured_for_free_use():
+    from intraday_advisor.agents.llm import MODEL_PREFERENCES, PRESETS
+
+    preset = PRESETS["openrouter"]
+    assert preset["base_url"] == "https://openrouter.ai/api/v1"
+    # OpenRouter asks callers to identify themselves.
+    assert "HTTP-Referer" in preset["headers"]
+    # The default is the auto-router, which survives model retirement.
+    assert preset["model"] == "openrouter/free"
+    assert MODEL_PREFERENCES["openrouter"][0] == "openrouter/free"
+
+
+def test_free_detection_trusts_pricing_over_the_name():
+    """The ':free' suffix is a naming convention; pricing is the contract.
+    Billing a user because a suffix was missing is not acceptable."""
+    from intraday_advisor.agents.llm import _is_free
+
+    assert _is_free({"pricing": {"prompt": "0", "completion": "0"}}, "x/y") is True
+    assert _is_free({"pricing": {"prompt": "0.0000012", "completion": "0"}},
+                    "x/y:free") is False
+    # No pricing at all: fall back to the suffix.
+    assert _is_free({}, "x/y:free") is True
+    assert _is_free({}, "x/y") is False
+
+
+def test_discovery_skips_free_but_unsuitable_models(monkeypatch):
+    """Free does not mean usable: audio, classifier and code-only models must
+    not be chosen for a risk verdict."""
+    import intraday_advisor.agents.llm as llm_module
+
+    catalogue = {"data": [
+        {"id": "google/lyria-3-pro-preview", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "nvidia/nemotron-3.5-content-safety:free", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "cohere/north-mini-code:free", "pricing": {"prompt": "0", "completion": "0"}},
+        {"id": "some/good-model:free", "pricing": {"prompt": "0", "completion": "0"}},
+    ]}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return catalogue
+
+    class FakeRequests:
+        @staticmethod
+        def get(*args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setitem(__import__("sys").modules, "requests", FakeRequests)
+    chosen = llm_module.discover_model("http://x", "", "openrouter")
+    assert chosen == "some/good-model:free"
+
+
+def test_discovery_excludes_paid_models_on_openrouter(monkeypatch):
+    """Silently falling back to a billed model is not an acceptable failure
+    mode for a checker that runs all day."""
+    import intraday_advisor.agents.llm as llm_module
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [
+                {"id": "expensive/model", "pricing": {"prompt": "0.00003", "completion": "0.00006"}},
+            ]}
+
+    class FakeRequests:
+        @staticmethod
+        def get(*args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setitem(__import__("sys").modules, "requests", FakeRequests)
+    assert llm_module.discover_model("http://x", "", "openrouter") is None

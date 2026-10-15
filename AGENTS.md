@@ -73,8 +73,36 @@ ollama pull llama3.1:8b
 set AGENT_PROVIDER=ollama
 ```
 
-**3. A free-tier hosted model — faster, needs a key.** Both are wired and
-tested.
+**3. OpenRouter — one key, many models, 18 of them free.** Probably the best
+option if you already have a key.
+
+```ini
+AGENT_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+```
+
+Why it suits this project in particular: **every single model id hardcoded in
+this file had already been retired within weeks of being written** — Groq
+dropped `llama-3.3-70b-versatile`, `gemini-2.0-flash` never existed,
+`gemini-2.5-flash` became unavailable to new users, and all five of the
+OpenRouter ids I first chose were gone by the time I tested them. The default
+is therefore `openrouter/free`, OpenRouter's **auto-router across free models**,
+which picks whatever is currently up. Churn stops being your problem.
+
+It also routes around per-model outages — the thing that made Gemini's bigger
+flash models unusable here (constant 503s on the free tier).
+
+**Free means free, verified from pricing, not naming.** Discovery filters the
+catalogue by the published `pricing` fields rather than trusting the `:free`
+suffix, and a model with *no* pricing block is treated as paid. Free-but-wrong
+models (audio, content-safety classifiers, code-only) are excluded too — free
+does not mean suitable for a risk verdict.
+
+Free tiers are rate-limited (roughly 20 requests/minute, 50/day without
+credits). The per-candle caching below keeps usage to about 2 calls per
+5 minutes, which fits comfortably.
+
+**4. Groq and Gemini direct — also wired and tested.**
 
 Put the keys in `.env` (which **is** now loaded — it never was before):
 
@@ -147,8 +175,16 @@ check that changes its mind at random cannot be tested.
 
 ### Claude
 
-Not wired yet — you asked for free agents first. The provider interface is
-ready, so it slots in beside the others. Worth doing once the free ones have
+Not wired as a direct provider yet — you asked for free agents first. Two routes
+when you want it:
+
+1. **Through OpenRouter**, which already serves Anthropic models — a one-line
+   change (`AGENT_MODEL=anthropic/claude-...`) with no new key and no new code.
+   The cheapest way to find out whether a stronger model earns its cost here.
+2. **Direct Anthropic API**, which is better for prompt caching and cost control
+   once it is proven worth running.
+
+Worth doing in that order. Worth doing once the free ones have
 shown whether the LLM layer adds anything the checklist does not: if a local
 model and the rules always agree, paying for a better model buys nothing.
 
