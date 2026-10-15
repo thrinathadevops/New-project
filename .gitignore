@@ -7,4 +7,8 @@ __pycache__/
 data/*.sqlite
 data/*.db
 data/test-advisor-*.sqlite
-logs/*.csv
+
+# Logs can contain broker credentials. SmartAPI echoes the full POST body --
+# clientcode, PIN and TOTP -- into its error logs on a failed login, so the
+# whole directory is excluded, not just *.csv as before.
+logs/

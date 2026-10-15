@@ -65,6 +65,11 @@ class IndexOptionSignal:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     timestamp: str = ""
+    # Timestamp of the CLOSED candle this decision was computed from. Distinct
+    # from ``timestamp``, which is wall-clock emission time. The ledger grades
+    # against this one: grading against emission time would let the grader read
+    # prices from inside the signal bar, which is look-ahead.
+    bar_time: str = ""
     is_live: bool = False
 
     def as_dict(self) -> dict:
@@ -150,8 +155,11 @@ def analyze_index_option(
 
     underlying_bias = "neutral"
     underlying_conf = 0
+    bar_time = ""
     if candles is not None and not candles.empty:
         closed = drop_forming_candle(candles, interval)
+        if closed is not None and not closed.empty:
+            bar_time = str(closed.index[-1])
         underlying_bias, underlying_conf, u_reasons, u_warn = _underlying_bias(closed)
         reasons.extend(u_reasons)
         warnings.extend(u_warn)
@@ -240,6 +248,7 @@ def analyze_index_option(
         reasons=reasons,
         warnings=warnings,
         timestamp=datetime.now().isoformat(timespec="seconds"),
+        bar_time=bar_time,
         is_live=is_live,
     )
 

@@ -34,6 +34,12 @@ from intraday_advisor.index_options import (
 from intraday_advisor.position_monitor import evaluate_position
 from intraday_advisor.data import drop_forming_candle, fetch_yahoo_ohlcv
 from intraday_advisor.indicators import add_indicators
+from intraday_advisor.ledger import (
+    ledger_stats,
+    lot_size_for,
+    plan_position,
+    record_index_signal,
+)
 
 # --------------------------------------------------------------------------- #
 # setup
@@ -87,6 +93,34 @@ with st.sidebar:
         "focuses on the two most liquid index options."
     )
     st.divider()
+    st.subheader("💰 Capital & risk")
+    available_capital = st.number_input(
+        "Capital available now (₹)", min_value=0.0, value=20_000.0, step=1_000.0,
+        help="Whatever is actually in the account right now. Position size and "
+             "the risk percentage below are computed from this, not from a "
+             "hardcoded figure.",
+    )
+    max_fraction = st.slider(
+        "Max % of capital to deploy", 5, 100, 100, 5,
+        help="At 100%, a -20% premium stop is a -20% account loss regardless of "
+             "how much capital you hold, because extra capital buys extra lots "
+             "rather than safety. Deploying less is the only lever.",
+    ) / 100
+
+    st.divider()
+    st.subheader("📒 Signal ledger")
+    record_signals = st.toggle(
+        "Record signals for grading", value=True,
+        help="Writes every CALL/PUT signal to the ledger so outcomes can be "
+             "graded after the close. Repeated refreshes inside one candle are "
+             "deduped, so this stores one row per bar per contract.",
+    )
+    st.caption(
+        "After 15:30 run `python ledger_cli.py grade`, then "
+        "`python ledger_cli.py report` to see whether the score has any edge."
+    )
+
+    st.divider()
     st.caption(
         "⚠️ This is decision support, not a profit guarantee. WAIT is a valid, "
         "frequent call. Always cut losers at your stop."
@@ -130,10 +164,84 @@ def live_premium(index: str, strike: float, opt_type: str, spot: float) -> tuple
     return get_option_premium(index, strike, opt_type, spot=spot)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def option_token(index: str, strike: float, opt_type: str) -> str | None:
+    """NFO token for a contract, cached for an hour.
+
+    Resolution loads the Angel instrument master, which is far too slow to do
+    on every 15-second rerun. Without a token the grader cannot read that
+    strike's premium path, so this is what makes a signal gradeable at all.
+    """
+    from intraday_advisor.tick_stream import resolve_option_token
+
+    return resolve_option_token(index, strike, opt_type)
+
+
+def record_to_ledger(
+    signals: list[dict], capital: float, fraction: float, enabled: bool
+) -> list[dict]:
+    """Record directional signals and attach a sized plan to each.
+
+    Called on every rerun rather than inside a cached function: the ledger
+    dedupes by (bar, contract), so a 15-second refresh across a 5-minute candle
+    stores exactly one row. Doing it inside ``get_signals`` would skip
+    recording on every cache hit and lose most bars.
+
+    Recording must never break the screen, so every failure degrades to a
+    warning on the card.
+    """
+    for signal in signals:
+        signal["_plan"] = None
+        signal["_ledger_error"] = None
+        if signal.get("direction") not in ("CALL", "PUT"):
+            continue
+        if float(signal.get("entry_premium") or 0) <= 0:
+            continue
+
+        try:
+            lot = lot_size_for(signal["index"])
+            signal["_plan"] = plan_position(
+                available_capital=capital,
+                entry_premium=float(signal["entry_premium"]),
+                stop_premium=float(signal["stop_premium"]),
+                target_premium=float(signal["target_premium"]),
+                lot_size=lot,
+                max_capital_fraction=fraction,
+            )
+        except (ValueError, KeyError) as exc:
+            signal["_ledger_error"] = f"Sizing failed: {exc}"
+            continue
+
+        if not enabled:
+            continue
+        if not signal.get("bar_time"):
+            signal["_ledger_error"] = "No closed candle yet — not recorded."
+            continue
+
+        try:
+            record_index_signal(
+                signal,
+                bar_time=signal["bar_time"],
+                lot_size=lot,
+                option_token=option_token(
+                    signal["index"], signal["strike"], signal["option_type"]
+                ),
+                plan=signal["_plan"],
+                available_capital=capital,
+                # Estimated (non-live) premiums must never enter a statistic.
+                is_synthetic=not signal.get("is_live", False),
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the screen
+            signal["_ledger_error"] = f"Not recorded: {exc}"
+    return signals
+
+
 # --------------------------------------------------------------------------- #
 # header
 # --------------------------------------------------------------------------- #
-signals = get_signals(target_pct, stop_pct)
+signals = record_to_ledger(
+    get_signals(target_pct, stop_pct), available_capital, max_fraction, record_signals
+)
 any_live = any(s.get("is_live") for s in signals)
 mkt = is_market_open()
 
@@ -156,6 +264,24 @@ if not any_live:
         icon="⚠️",
     )
 st.caption(f"Last updated: {now_ist().strftime('%Y-%m-%d %H:%M:%S')} IST · target +{target_pct*100:.0f}% · stop -{stop_pct*100:.0f}%")
+
+# --- ledger status: how close the sample is to being able to prove anything ---
+_stats = ledger_stats()
+if _stats["real_signals"]:
+    _needed = max(0, 30 - _stats["graded"])
+    st.caption(
+        f"📒 Ledger: {_stats['real_signals']} signals recorded over "
+        f"{_stats['sessions']} session(s) · {_stats['graded']} graded, "
+        f"{_stats['ungraded']} awaiting grading"
+        + (f" · {_needed} more graded trades before any verdict is meaningful"
+           if _needed else " · enough for a first read: `python ledger_cli.py report`")
+    )
+elif record_signals:
+    st.caption(
+        "📒 Ledger is empty. Signals recorded here get graded after the close "
+        "(`python ledger_cli.py grade`) so you can find out whether the score "
+        "has any edge. Expect ~30 trades before the numbers mean anything."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -191,6 +317,41 @@ for col, s in zip(cols, signals):
                 p1.metric("Entry ₹", f"{s['entry_premium']:.2f}")
                 p2.metric(f"Target +{target_pct*100:.0f}%", f"{s['target_premium']:.2f}")
                 p3.metric(f"Stop -{stop_pct*100:.0f}%", f"{s['stop_premium']:.2f}")
+
+                # --- what this actually costs and risks, at your capital ---
+                plan = s.get("_plan")
+                if plan is not None:
+                    if not plan.affordable:
+                        st.error(
+                            f"❌ One lot needs ₹{plan.capital_per_lot:,.0f} — "
+                            f"you have ₹{plan.available_capital:,.0f}. Cannot take this trade.",
+                            icon="🚫",
+                        )
+                    else:
+                        band_icon = {"SAFE": "🟢", "CAUTION": "🟠", "SEVERE": "🔴"}
+                        r1, r2, r3 = st.columns(3)
+                        r1.metric("Lots", f"{plan.lots}",
+                                  help=f"₹{plan.deployed_capital:,.0f} deployed "
+                                       f"({plan.capital_utilisation*100:.0f}% of capital)")
+                        r2.metric(
+                            f"{band_icon.get(plan.risk_band, '')} Risk",
+                            f"{plan.risk_pct_of_capital*100:.1f}%",
+                            help=f"₹{plan.risk_amount:,.0f} if stopped, net of costs. "
+                                 f"{plan.losses_to_halve} such losses in a row halve "
+                                 f"the account.",
+                        )
+                        r3.metric("Net R:R", f"{plan.net_rr:.2f}",
+                                  help=f"After ₹{plan.round_trip_cost:,.0f} round-trip "
+                                       f"costs. Breakeven ₹{plan.breakeven:.2f}.")
+                        st.caption(
+                            f"Breakeven ₹{plan.breakeven:.2f} · costs "
+                            f"{plan.cost_drag*100:.2f}% of position"
+                        )
+                    for warning in plan.warnings:
+                        st.warning(warning, icon="⚠️")
+
+                if s.get("_ledger_error"):
+                    st.caption(f"📒 {s['_ledger_error']}")
 
                 if st.button(f"➕ Track this {s['index']} trade", key=f"track_{s['index']}"):
                     st.session_state["positions"].append({
