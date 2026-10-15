@@ -66,10 +66,14 @@ from intraday_advisor.ledger import (
 from intraday_advisor.ledger.report import expectancy_report, score_band_report
 from intraday_advisor.ledger.schema import DEFAULT_LEDGER_PATH
 from intraday_advisor.positions import (
+    closed_trades,
+    daily_pnl_series,
     evaluate_live,
     load_open_positions,
+    performance_summary,
     session_summary,
 )
+from intraday_advisor.readings import GLOSSARY, build_playbook, build_readings
 
 logger = logging.getLogger("engine")
 
@@ -254,6 +258,11 @@ class Engine:
                 view["lot_size"] = lot_size
             except ValueError as exc:
                 view["warnings"] = list(view.get("warnings", [])) + [f"Sizing: {exc}"]
+
+        # --- plain-language interpretation of the same features that were
+        # scored, so a number on screen is never unexplained ---
+        view["readings"] = build_readings(view)
+        view["playbook"] = build_playbook(view)
 
         # --- record for grading ---
         view["recorded"] = False
@@ -461,6 +470,15 @@ class Engine:
                 "capital_free": round(max(0.0, self.available_capital - exposure), 2),
             },
             "ledger": self._ledger_panel(),
+            # What YOU actually made, as distinct from whether the ENGINE has an
+            # edge (that is the ledger block). The two can disagree, and the gap
+            # between them is itself worth seeing.
+            "history": {
+                "trades": closed_trades(limit=50, db_path=self.db_path),
+                "daily": daily_pnl_series(days=30, db_path=self.db_path),
+                "summary": performance_summary(db_path=self.db_path),
+            },
+            "glossary": GLOSSARY,
             "compute_ms": round((time.perf_counter() - started) * 1000, 1),
         })
 

@@ -254,3 +254,172 @@ def session_summary(
         "wins": int(row["wins"] or 0),
         "win_rate": round(int(row["wins"] or 0) / closed, 4) if closed else None,
     }
+
+
+def delete_position(
+    position_id: str, *, db_path: str | Path = DEFAULT_LEDGER_PATH
+) -> bool:
+    """Remove a position outright. For clearing test rows, not for closing.
+
+    Closing a position records what happened and keeps it in the history, which
+    is the point of a journal. Deleting throws it away entirely, so it exists
+    only to clean up rows that were never real trades.
+    """
+    init_ledger(db_path)
+    with connect(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM positions WHERE position_id = ?", (position_id,)
+        )
+    return cursor.rowcount > 0
+
+
+def closed_trades(
+    *, limit: int = 50, db_path: str | Path = DEFAULT_LEDGER_PATH
+) -> list[dict]:
+    """Recent closed positions, newest first, with cost broken out.
+
+    This is the answer to "where did that number come from?". Every rupee in
+    the session P&L traces to a row here.
+    """
+    init_ledger(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM positions
+             WHERE status = 'CLOSED'
+             ORDER BY closed_at DESC
+             LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+
+    out = []
+    for row in rows:
+        quantity = int(row["lot_size"]) * int(row["lots"])
+        entry = float(row["entry_premium"])
+        exit_premium = float(row["exit_premium"] or 0)
+        gross = (exit_premium - entry) * quantity
+        net = float(row["net_pnl"] or 0)
+        out.append({
+            "position_id": row["position_id"],
+            "session_date": row["session_date"],
+            "opened_at": row["opened_at"],
+            "closed_at": row["closed_at"],
+            "contract": f"{row['index_name']} {row['strike']:g} {row['option_type']}",
+            "index_name": row["index_name"],
+            "option_type": row["option_type"],
+            "strike": float(row["strike"]),
+            "lots": int(row["lots"]),
+            "quantity": quantity,
+            "entry_premium": entry,
+            "exit_premium": exit_premium,
+            "deployed": round(entry * quantity, 2),
+            "gross_pnl": round(gross, 2),
+            # Costs are the gap between gross and net: the number that turns a
+            # "small winner" into a loser and is invisible on a premium chart.
+            "cost": round(gross - net, 2),
+            "net_pnl": round(net, 2),
+            "pnl_pct": round((exit_premium - entry) / entry, 4) if entry else 0.0,
+            "exit_reason": row["exit_reason"],
+        })
+    return out
+
+
+def daily_pnl_series(
+    *, days: int = 30, db_path: str | Path = DEFAULT_LEDGER_PATH
+) -> list[dict]:
+    """Realised net P&L per session, oldest first, with a running total.
+
+    The equity curve. A single day's profit says nothing; the shape of the
+    cumulative line is the only honest picture of whether this is working.
+    """
+    init_ledger(db_path)
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT session_date,
+                   COALESCE(SUM(net_pnl), 0) AS net,
+                   COUNT(*) AS trades,
+                   COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0) AS wins
+              FROM positions
+             WHERE status = 'CLOSED'
+             GROUP BY session_date
+             ORDER BY session_date DESC
+             LIMIT ?
+            """,
+            (int(days),),
+        ).fetchall()
+
+    series = []
+    running = 0.0
+    for row in reversed(rows):            # back to oldest-first for the curve
+        running += float(row["net"] or 0)
+        series.append({
+            "session_date": row["session_date"],
+            "net": round(float(row["net"] or 0), 2),
+            "cumulative": round(running, 2),
+            "trades": int(row["trades"]),
+            "wins": int(row["wins"]),
+        })
+    return series
+
+
+def performance_summary(*, db_path: str | Path = DEFAULT_LEDGER_PATH) -> dict:
+    """Realised performance across every session, with an honest verdict.
+
+    Separate from the signal ledger's expectancy: that measures whether the
+    *engine* has an edge, this measures whether *you* made money. They can
+    disagree, and the gap is itself informative.
+    """
+    trades = closed_trades(limit=100_000, db_path=db_path)
+    if not trades:
+        return {
+            "trades": 0, "net": 0.0, "gross": 0.0, "costs": 0.0,
+            "wins": 0, "losses": 0, "win_rate": None,
+            "avg_win": None, "avg_loss": None, "profit_factor": None,
+            "best": None, "worst": None, "sessions": 0,
+            "verdict": "No closed trades yet. Take a trade, close it here, and "
+                       "this becomes your real track record.",
+        }
+
+    nets = [t["net_pnl"] for t in trades]
+    wins = [n for n in nets if n > 0]
+    losses = [n for n in nets if n <= 0]
+    gross_profit = sum(wins)
+    gross_loss = abs(sum(losses))
+    total_costs = sum(t["cost"] for t in trades)
+    net = sum(nets)
+    sessions = len({t["session_date"] for t in trades})
+
+    if len(nets) < 20:
+        verdict = (
+            f"{len(nets)} closed trade(s) — too few to call. A track record "
+            f"needs 20+ before the average means anything."
+        )
+    elif net > 0:
+        verdict = (
+            f"Net +₹{net:,.0f} over {len(nets)} trades across {sessions} "
+            f"session(s), after ₹{total_costs:,.0f} in costs."
+        )
+    else:
+        verdict = (
+            f"Net ₹{net:,.0f} over {len(nets)} trades. Costs alone were "
+            f"₹{total_costs:,.0f} — check whether cheap contracts are the problem."
+        )
+
+    return {
+        "trades": len(nets),
+        "net": round(net, 2),
+        "gross": round(sum(t["gross_pnl"] for t in trades), 2),
+        "costs": round(total_costs, 2),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": round(len(wins) / len(nets), 4),
+        "avg_win": round(sum(wins) / len(wins), 2) if wins else None,
+        "avg_loss": round(sum(losses) / len(losses), 2) if losses else None,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else None,
+        "best": round(max(nets), 2),
+        "worst": round(min(nets), 2),
+        "sessions": sessions,
+        "verdict": verdict,
+    }

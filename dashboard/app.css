@@ -836,3 +836,100 @@ table.data td.neg { color: var(--critical); font-weight: 600; }
   .hero__value { font-size: 33px; }
   .toasts { width: calc(100vw - 24px); right: 12px; }
 }
+
+/* ===================================================== live read panel === */
+/* Each indicator gets: what it is, the current number, what that means, and
+   what it implies. A reading with no interpretation teaches nothing. */
+
+.readings { display: grid; gap: 10px; }
+
+.reading {
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border-left: 3px solid var(--text-muted);
+}
+.reading--bullish { border-left-color: var(--good); }
+.reading--bearish { border-left-color: var(--critical); }
+.reading--caution { border-left-color: var(--warning); }
+.reading--neutral { border-left-color: var(--text-muted); }
+
+.reading__head {
+  display: flex; align-items: baseline; gap: 8px;
+  flex-wrap: wrap; margin-bottom: 6px;
+}
+.reading__icon { font-size: 12px; font-weight: 700; flex: none; }
+.reading--bullish .reading__icon { color: var(--good); }
+.reading--bearish .reading__icon { color: var(--critical); }
+.reading--caution .reading__icon { color: var(--warning); }
+.reading__label { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.reading__value {
+  font-size: 12px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums; margin-left: auto;
+}
+.reading__what {
+  margin: 0 0 6px; font-size: 12px; line-height: 1.5;
+  color: var(--text-muted);
+}
+.reading__meaning {
+  margin: 0 0 6px; font-size: 12.5px; line-height: 1.5;
+  color: var(--text-secondary);
+}
+.reading__action {
+  margin: 0; font-size: 12.5px; line-height: 1.5;
+  color: var(--text-primary);
+}
+
+/* ========================================================== playbook ==== */
+/* The answer to "when do I enter and when do I get out", in the operator's
+   own numbers. Concrete enough to obey and to grade afterwards. */
+
+.playbook {
+  margin: 4px 0 12px;
+  padding: 13px 15px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-wash);
+  border: 1px solid var(--accent);
+}
+.playbook--wait {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+.playbook__head {
+  font-size: 14px; font-weight: 700; margin-bottom: 4px;
+  color: var(--text-primary);
+}
+.playbook__why {
+  margin: 0 0 9px; font-size: 12.5px; line-height: 1.5;
+  color: var(--text-secondary);
+}
+.playbook__steps {
+  margin: 0; padding-left: 19px;
+  display: grid; gap: 7px;
+}
+.playbook__steps li {
+  font-size: 12.5px; line-height: 1.55;
+  color: var(--text-secondary);
+}
+.playbook__steps li b { color: var(--text-primary); }
+
+/* ========================================================== glossary ==== */
+
+.gloss {
+  padding: 13px 15px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.gloss__term { font-size: 14px; font-weight: 700; color: var(--text-primary); }
+.gloss__plain {
+  font-size: 12.5px; color: var(--accent);
+  font-weight: 600; margin: 2px 0 7px;
+}
+.gloss__detail {
+  margin: 0 0 7px; font-size: 12.5px; line-height: 1.55;
+  color: var(--text-secondary);
+}
+.gloss__use {
+  margin: 0; font-size: 12.5px; line-height: 1.5;
+  color: var(--text-primary);
+}

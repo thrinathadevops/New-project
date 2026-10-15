@@ -163,3 +163,77 @@ def test_positions_survive_reload(db):
     a_position(db, lots=3)
     assert len(load_open_positions(db_path=db)) == 1
     assert load_open_positions(db_path=db)[0].quantity == 225
+
+
+# ===================================================== journal & history ====
+
+def test_closed_trades_breaks_out_cost(db):
+    """The gap between gross and net is the number that turns a 'small winner'
+    into a loser, and it is invisible on a premium chart."""
+    from intraday_advisor.positions import closed_trades
+
+    position_id = a_position(db)
+    close_position(position_id, exit_premium=105.0, db_path=db)
+    trade = closed_trades(db_path=db)[0]
+
+    assert trade["gross_pnl"] == pytest.approx(5.0 * 75)
+    assert trade["cost"] > 0
+    assert trade["net_pnl"] == pytest.approx(trade["gross_pnl"] - trade["cost"], abs=0.02)
+    assert trade["contract"] == "NIFTY 23000 CE"
+
+
+def test_a_flat_round_trip_is_a_pure_cost_loss(db):
+    """Buying and selling at the same premium is not break-even."""
+    from intraday_advisor.positions import closed_trades
+
+    position_id = a_position(db, lots=2)
+    close_position(position_id, exit_premium=100.0, db_path=db)
+    trade = closed_trades(db_path=db)[0]
+
+    assert trade["gross_pnl"] == pytest.approx(0.0)
+    assert trade["net_pnl"] < 0
+    assert trade["net_pnl"] == pytest.approx(-trade["cost"], abs=0.02)
+
+
+def test_daily_series_accumulates(db):
+    from intraday_advisor.positions import daily_pnl_series
+
+    for premium in (130.0, 90.0):
+        close_position(a_position(db), exit_premium=premium, db_path=db)
+
+    series = daily_pnl_series(db_path=db)
+    assert len(series) == 1                      # both on the same session
+    assert series[0]["trades"] == 2
+    assert series[0]["cumulative"] == series[0]["net"]
+
+
+def test_performance_summary_refuses_to_conclude_early(db):
+    from intraday_advisor.positions import performance_summary
+
+    close_position(a_position(db), exit_premium=130.0, db_path=db)
+    summary = performance_summary(db_path=db)
+
+    assert summary["trades"] == 1
+    assert "too few to call" in summary["verdict"]
+
+
+def test_performance_summary_on_empty_db(db):
+    from intraday_advisor.positions import performance_summary
+
+    summary = performance_summary(db_path=db)
+    assert summary["trades"] == 0
+    assert summary["win_rate"] is None
+    assert "No closed trades yet" in summary["verdict"]
+
+
+def test_delete_removes_a_row_entirely(db):
+    """For clearing test entries. Closing keeps history; deleting discards it."""
+    from intraday_advisor.positions import closed_trades, delete_position
+
+    position_id = a_position(db)
+    close_position(position_id, exit_premium=110.0, db_path=db)
+    assert len(closed_trades(db_path=db)) == 1
+
+    assert delete_position(position_id, db_path=db) is True
+    assert closed_trades(db_path=db) == []
+    assert delete_position(position_id, db_path=db) is False

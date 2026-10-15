@@ -142,10 +142,11 @@ class Broadcaster:
                 await self.broadcast(snapshot)
             except Exception as exc:  # noqa: BLE001 - the loop must survive
                 logger.error("Snapshot failed: %s", exc, exc_info=True)
-                await self.broadcast({
-                    "type": "error",
-                    "message": f"Snapshot failed: {exc}",
-                })
+                with contextlib.suppress(Exception):
+                    await self.broadcast({
+                        "type": "error",
+                        "message": f"Snapshot failed: {exc}",
+                    })
 
             self._wake.clear()
             with contextlib.suppress(asyncio.TimeoutError):
@@ -168,7 +169,7 @@ class Broadcaster:
                            "snapshot withheld. See the server log.",
             })
         dead = set()
-        for client in clients:
+        for client in list(clients):
             try:
                 await client.send(payload)
             except Exception:  # noqa: BLE001
@@ -252,6 +253,27 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
             "type": "ack", "title": "Position closed",
             "message": f"Net {result['net_pnl']:+,.0f} after "
                        f"{result['cost']:,.0f} in costs.",
+        }))
+        broadcaster.request_refresh()
+        return
+
+    if kind == "delete_position":
+        from intraday_advisor.positions import delete_position
+        try:
+            removed = await asyncio.to_thread(
+                delete_position, message["position_id"],
+                db_path=broadcaster.engine.db_path,
+            )
+        except (KeyError, TypeError) as exc:
+            await socket.send(json.dumps({
+                "type": "error", "message": f"Could not delete: {exc}"
+            }))
+            return
+        logger.info("Position deleted: %s (%s)", message.get("position_id"), removed)
+        await socket.send(json.dumps({
+            "type": "ack", "title": "Row removed" if removed else "Nothing to remove",
+            "message": "The trade is gone from your record."
+                       if removed else "No such position.",
         }))
         broadcaster.request_refresh()
         return

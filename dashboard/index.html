@@ -189,6 +189,68 @@
     </div>
   </section>
 
+  <!-- ============================================ trade journal ======= -->
+  <section class="card" style="margin-top:16px" aria-label="Trade journal">
+    <div class="card__head">
+      <h2 class="card__title">Your track record — every closed trade</h2>
+      <span class="tag tag--muted" id="journal-count"></span>
+    </div>
+
+    <div id="realised-verdict" class="verdict">No closed trades yet.</div>
+
+    <div class="edge-grid" style="margin-top:16px">
+      <div>
+        <h3 class="card__title" style="margin-bottom:9px">Cumulative net P&amp;L</h3>
+        <div class="chart-wrap" style="height:190px">
+          <canvas id="equity" role="img"
+                  aria-label="Cumulative realised net profit and loss by session"></canvas>
+        </div>
+        <p class="field__hint" id="equity-note" style="margin-top:8px"></p>
+      </div>
+
+      <div>
+        <h3 class="card__title" style="margin-bottom:9px">Where the money went</h3>
+        <div class="stat-list">
+          <div class="stat"><span class="stat__label">Gross P&amp;L</span>
+            <span class="stat__value" id="rp-gross">₹0</span></div>
+          <div class="stat"><span class="stat__label">Costs paid</span>
+            <span class="stat__value" id="rp-costs">₹0</span></div>
+          <div class="stat"><span class="stat__label">Net P&amp;L</span>
+            <span class="stat__value" id="rp-net">₹0</span></div>
+          <div class="stat"><span class="stat__label">Win rate</span>
+            <span class="stat__value" id="rp-winrate">—</span></div>
+          <div class="stat"><span class="stat__label">Profit factor</span>
+            <span class="stat__value" id="rp-pf">—</span></div>
+          <div class="stat"><span class="stat__label">Best / worst</span>
+            <span class="stat__value" id="rp-extremes">—</span></div>
+        </div>
+        <p class="field__hint" style="margin-top:9px">
+          Gross minus costs is net. If costs are a large share of gross, the
+          contracts are too cheap or the position too small for flat
+          ₹20-per-order brokerage.
+        </p>
+      </div>
+    </div>
+
+    <div class="table-scroll" style="margin-top:16px">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Closed</th><th>Contract</th><th class="num">Lots</th>
+            <th class="num">Entry</th><th class="num">Exit</th>
+            <th class="num">Gross</th><th class="num">Cost</th>
+            <th class="num">Net</th><th class="num">%</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="journal-body"></tbody>
+      </table>
+    </div>
+    <div id="journal-empty" class="empty">
+      Nothing closed yet. Every trade you close appears here with its costs
+      broken out, so the session P&amp;L above is always traceable to a row.
+    </div>
+  </section>
+
   <!-- ================================================== edge ========== -->
   <section class="card" style="margin-top:16px" aria-label="Edge measurement">
     <div class="card__head">
@@ -228,6 +290,19 @@
         </p>
       </div>
     </div>
+  </section>
+
+  <!-- ================================================= learn ========== -->
+  <section class="card" style="margin-top:16px" aria-label="Indicator guide">
+    <div class="card__head">
+      <h2 class="card__title">What the indicators mean</h2>
+      <button id="glossary-toggle" class="btn btn--ghost">Show guide</button>
+    </div>
+    <p class="field__hint" style="margin-top:-6px">
+      Each signal card has a <b>Live read</b> panel that applies all of this to
+      the current numbers. This is the reference for what each one is.
+    </p>
+    <div id="glossary" class="edge-grid" style="margin-top:14px" hidden></div>
   </section>
 
   <p class="field__hint" style="margin-top:22px;text-align:center">

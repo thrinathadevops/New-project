@@ -61,6 +61,49 @@ a second browser. A position at its stop pulses red and says `EXIT NOW`. P&L is
 **net of costs** — the old screen showed gross premium movement, which
 overstates every small winner.
 
+## Learning what you're looking at
+
+**Playbook** (on every signal card) — the entry/exit rules in your own numbers:
+entry price, lot count, the rupee cost of one stop-out, where the stop goes,
+where to book, the **invalidation** level (your reason is gone even if the stop
+has not been hit), the 15:15 time stop, and your true breakeven. On a WAIT it
+says plainly that doing nothing is the correct move and why.
+
+**Live read** — every indicator with (a) what it is, (b) the current numbers,
+(c) what that particular reading means, (d) what it implies for the trade. If an
+indicator cannot be computed it says so and why, instead of silently vanishing:
+VWAP needs volume, and the free index feed reports none for NIFTY/BANKNIFTY, so
+it reads "unavailable on this feed" with the reason.
+
+**What the indicators mean** — the standing reference at the bottom of the page
+for EMA 9/21, VWAP, RSI, SuperTrend, ATR, PCR and OI walls, breakeven premium
+and net R:R.
+
+These describe what price has **already** done. They do not predict. Every
+"bullish" reading is a statement about the past that is merely *more often*
+followed by an up-move — and how often is exactly what the ledger measures,
+because nobody actually knows the number until they do.
+
+## Your track record
+
+Separate from the signal ledger, which measures whether the *engine* has an
+edge. This measures whether **you** made money, and the two can disagree.
+
+- **Cumulative net P&L curve** — one point per session, filled against the zero
+  line so time spent underwater is obvious. A single day says nothing; the shape
+  of the line is the honest picture.
+- **Where the money went** — gross, costs paid, net, win rate, profit factor,
+  best and worst. If costs are a large share of gross, the contracts are too
+  cheap or the position too small for flat ₹20-per-order brokerage.
+- **Every closed trade** with entry, exit, **gross, cost and net broken out**,
+  so the session P&L is always traceable to a row. Each row has an ✕ to delete
+  test entries (with a confirmation that says deleting a real trade makes the
+  record a lie).
+
+A flat round trip is not break-even. Buying and selling 212 lots at the same
+premium shows up here as gross ₹0, cost ₹1,416, **net −₹1,416** — which is the
+clearest cost lesson the system can give you.
+
 ## Colour
 
 The previous dashboard had white text on `#3987e5`, which measures **3.64:1** —

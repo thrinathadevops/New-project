@@ -71,6 +71,7 @@ const state = {
   soundOn: false,
   tableView: false,
   seenEvents: new Set(),
+  controlsSynced: false,
 };
 
 // ------------------------------------------------------------------ sound --
@@ -309,6 +310,13 @@ function signalCard(signal, changed) {
       ${riskStrip(plan)}
       ${warnBlocks}
 
+      ${playbookPanel(signal.playbook)}
+
+      <details class="why">
+        <summary>Live read — what each indicator is saying now</summary>
+        <div class="why__body">${readingsPanel(signal.readings)}</div>
+      </details>
+
       <details class="why">
         <summary>Why this score — full breakdown</summary>
         <div class="why__body">
@@ -329,6 +337,44 @@ function signalCard(signal, changed) {
         </div>
       </details>
     </article>`;
+}
+
+
+// ------------------------------------------------------- live read panel ---
+
+const STATE_ICON = { bullish: '\u25B2', bearish: '\u25BC', neutral: '\u2022', caution: '!' };
+
+function readingsPanel(readings) {
+  if (!readings || !readings.length) return '';
+  return `<div class="readings">${readings.map((r) => `
+    <div class="reading reading--${r.state}">
+      <div class="reading__head">
+        <span class="reading__icon">${STATE_ICON[r.state] || '\u2022'}</span>
+        <span class="reading__label">${escapeHtml(r.label)}</span>
+        <span class="reading__value">${escapeHtml(r.value)}</span>
+      </div>
+      <p class="reading__what">${escapeHtml(r.what)}</p>
+      <p class="reading__meaning">${escapeHtml(r.meaning)}</p>
+      <p class="reading__action"><b>So:</b> ${escapeHtml(r.action)}</p>
+    </div>`).join('')}</div>`;
+}
+
+function playbookPanel(playbook) {
+  if (!playbook) return '';
+  const steps = (playbook.steps || []).map((step) => {
+    const parts = String(step).split(' \u2014 ');
+    const head = parts.shift();
+    const body = parts.join(' \u2014 ');
+    return body
+      ? `<li><b>${escapeHtml(head)}</b> \u2014 ${escapeHtml(body)}</li>`
+      : `<li>${escapeHtml(head)}</li>`;
+  }).join('');
+  return `
+    <div class="playbook ${playbook.tradable ? '' : 'playbook--wait'}">
+      <div class="playbook__head">${escapeHtml(playbook.headline)}</div>
+      <p class="playbook__why">${escapeHtml(playbook.why)}</p>
+      <ol class="playbook__steps">${steps}</ol>
+    </div>`;
 }
 
 // ------------------------------------------------------------ renderers ----
@@ -472,6 +518,192 @@ function renderPositions(snapshot) {
       button.dataset.id, button.dataset.premium
     ));
   });
+}
+
+
+// --------------------------------------------------------------- journal ---
+
+function renderJournal(snapshot) {
+  const history = snapshot.history || {};
+  const trades = history.trades || [];
+  const summary = history.summary || {};
+
+  setText($('journal-count'), `${summary.trades || 0} closed`);
+
+  const verdict = $('realised-verdict');
+  verdict.textContent = summary.verdict || 'No closed trades yet.';
+  verdict.className = 'verdict' + (
+    (summary.net || 0) > 0 ? ' verdict--good'
+      : (summary.net || 0) < 0 ? ' verdict--danger' : ''
+  );
+
+  setText($('rp-gross'), rupees(summary.gross || 0, { sign: true }));
+  setText($('rp-costs'), rupees(summary.costs || 0));
+  setText($('rp-net'), rupees(summary.net || 0, { sign: true }));
+  setText($('rp-winrate'),
+    summary.win_rate === null || summary.win_rate === undefined
+      ? '\u2014' : percent(summary.win_rate, 0));
+  setText($('rp-pf'), summary.profit_factor ?? '\u2014');
+  setText($('rp-extremes'), summary.trades
+    ? `${rupees(summary.best, { sign: true })} / ${rupees(summary.worst, { sign: true })}`
+    : '\u2014');
+
+  const body = $('journal-body');
+  const empty = $('journal-empty');
+  if (!trades.length) {
+    body.innerHTML = '';
+    empty.hidden = false;
+  } else {
+    empty.hidden = true;
+    body.innerHTML = trades.map((t) => `
+      <tr>
+        <td>${escapeHtml((t.closed_at || '').slice(11, 16))}</td>
+        <td style="color:var(--text-primary);font-weight:600">
+          ${escapeHtml(t.contract)}</td>
+        <td class="num">${t.lots}</td>
+        <td class="num">\u20B9${t.entry_premium.toFixed(2)}</td>
+        <td class="num">\u20B9${t.exit_premium.toFixed(2)}</td>
+        <td class="num ${t.gross_pnl > 0 ? 'pos' : t.gross_pnl < 0 ? 'neg' : ''}">
+          ${rupees(t.gross_pnl, { sign: true })}</td>
+        <td class="num" style="color:var(--warning)">-${rupees(t.cost)}</td>
+        <td class="num ${t.net_pnl > 0 ? 'pos' : 'neg'}">
+          ${rupees(t.net_pnl, { sign: true })}</td>
+        <td class="num">${percent(t.pnl_pct)}</td>
+        <td><button class="btn btn--ghost delete-trade"
+                    data-id="${escapeHtml(t.position_id)}"
+                    title="Remove this row (for test entries)">\u2715</button></td>
+      </tr>`).join('');
+
+    body.querySelectorAll('.delete-trade').forEach((button) => {
+      button.addEventListener('click', () => {
+        const ok = window.confirm(
+          'Delete this trade from your record permanently?\n\n'
+          + 'Use this only for test rows. Deleting a real trade makes your '
+          + 'track record a lie.');
+        if (ok) send({ type: 'delete_position', position_id: button.dataset.id });
+      });
+    });
+  }
+
+  drawEquity(history.daily || []);
+}
+
+/** Cumulative realised P&L by session. A single day says nothing; the shape of
+ *  this line is the only honest picture of whether the system works. */
+function drawEquity(series) {
+  const canvas = $('equity');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const wrap = canvas.parentElement;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(wrap.clientWidth * ratio));
+  canvas.height = Math.max(1, Math.floor(wrap.clientHeight * ratio));
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+  const width = wrap.clientWidth;
+  const height = wrap.clientHeight;
+  ctx.clearRect(0, 0, width, height);
+
+  setText($('equity-note'), series.length
+    ? `${series.length} session(s) with closed trades. Each point is that `
+      + `session's running total, net of costs.`
+    : 'Nothing to plot yet \u2014 close a trade and the curve starts here.');
+
+  if (series.length < 1) {
+    ctx.fillStyle = cssVar('--text-muted');
+    ctx.font = '13px ' + cssVar('--font');
+    ctx.textAlign = 'center';
+    ctx.fillText('No closed trades yet', width / 2, height / 2);
+    return;
+  }
+
+  const pad = { top: 14, right: 62, bottom: 22, left: 8 };
+  const values = series.map((d) => d.cumulative);
+  let low = Math.min(0, ...values);
+  let high = Math.max(0, ...values);
+  if (high === low) { high += 1; low -= 1; }
+  const span = high - low;
+  low -= span * 0.12;
+  high += span * 0.12;
+
+  const x = (i) => (series.length === 1
+    ? (pad.left + width - pad.right) / 2
+    : pad.left + ((width - pad.left - pad.right) * i) / (series.length - 1));
+  const y = (v) => (height - pad.bottom)
+    - ((v - low) / (high - low)) * (height - pad.top - pad.bottom);
+
+  // Zero line: the only reference that matters on a P&L curve.
+  const zeroY = y(0);
+  ctx.strokeStyle = cssVar('--baseline');
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(pad.left, Math.round(zeroY) + 0.5);
+  ctx.lineTo(width - pad.right, Math.round(zeroY) + 0.5);
+  ctx.stroke();
+
+  ctx.fillStyle = cssVar('--text-muted');
+  ctx.font = '11px ' + cssVar('--font');
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('\u20B90', width - pad.right + 6, zeroY);
+  const last = values[values.length - 1];
+  ctx.fillText(`\u20B9${Math.round(last).toLocaleString('en-IN')}`,
+    width - pad.right + 6, y(last));
+
+  const positive = last >= 0;
+  const colour = positive ? cssVar('--good') : cssVar('--critical');
+
+  // Fill between the curve and zero, so time spent underwater is obvious.
+  ctx.beginPath();
+  ctx.moveTo(x(0), zeroY);
+  series.forEach((d, i) => ctx.lineTo(x(i), y(d.cumulative)));
+  ctx.lineTo(x(series.length - 1), zeroY);
+  ctx.closePath();
+  ctx.fillStyle = positive ? cssVar('--good-wash') : cssVar('--critical-wash');
+  ctx.fill();
+
+  ctx.beginPath();
+  series.forEach((d, i) => (i ? ctx.lineTo(x(i), y(d.cumulative))
+    : ctx.moveTo(x(i), y(d.cumulative))));
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  series.forEach((d, i) => {
+    ctx.beginPath();
+    ctx.arc(x(i), y(d.cumulative), 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = colour;
+    ctx.fill();
+    // 2px surface ring so overlapping points stay separable.
+    ctx.strokeStyle = cssVar('--surface-1');
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+
+  ctx.fillStyle = cssVar('--text-muted');
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText((series[0].session_date || '').slice(5), x(0), height - pad.bottom + 6);
+  if (series.length > 1) {
+    ctx.fillText((series[series.length - 1].session_date || '').slice(5),
+      x(series.length - 1), height - pad.bottom + 6);
+  }
+}
+
+function renderGlossary(snapshot) {
+  const container = $('glossary');
+  if (!container || container.dataset.filled === '1') return;
+  const terms = snapshot.glossary || [];
+  if (!terms.length) return;
+  container.innerHTML = terms.map((t) => `
+    <div class="gloss">
+      <div class="gloss__term">${escapeHtml(t.term)}</div>
+      <div class="gloss__plain">${escapeHtml(t.plain)}</div>
+      <p class="gloss__detail">${escapeHtml(t.detail)}</p>
+      <p class="gloss__use"><b>Use it for:</b> ${escapeHtml(t.use)}</p>
+    </div>`).join('');
+  container.dataset.filled = '1';
 }
 
 function renderHeader(snapshot) {
@@ -1037,7 +1269,10 @@ function connect() {
     state.reconnectDelay = 1000;
     $('conn-lost').hidden = true;
     document.querySelector('.app').classList.remove('is-stale');
-    pushSettings();
+    // Deliberately does NOT push settings here. The server owns the initial
+    // state (it has the command-line flags); pushing the form's defaults on
+    // connect silently overrode them -- a server started with --no-record
+    // still recorded, because the checkbox defaults to checked.
   });
 
   socket.addEventListener('message', (message) => {
@@ -1080,8 +1315,27 @@ function connect() {
   socket.addEventListener('error', () => socket.close());
 }
 
+/** Adopt the server's settings into the controls, once, on first snapshot.
+ *  After that the user owns them and the server follows. */
+function syncControls(settings) {
+  if (!settings || state.controlsSynced) return;
+  state.controlsSynced = true;
+
+  $('capital').value = settings.available_capital ?? 20000;
+  $('target').value = Math.round((settings.target_pct ?? 0.25) * 100);
+  $('stop').value = Math.round((settings.stop_pct ?? 0.20) * 100);
+  $('record').checked = settings.record !== false;
+
+  const deploy = Math.round((settings.max_capital_fraction ?? 1) * 100);
+  $('deploy').value = deploy;
+  setText($('deploy-val'), `${deploy}%`);
+  const implied = (settings.stop_pct ?? 0.2) * (deploy / 100);
+  setText($('deploy-hint'), `one stop ≈ ${(implied * 100).toFixed(1)}% of capital`);
+}
+
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
+  syncControls(snapshot.settings);
   document.querySelector('.app').classList.remove('is-stale');
 
   renderHeader(snapshot);
@@ -1089,6 +1343,8 @@ function applySnapshot(snapshot) {
   renderKpis(snapshot);
   renderPositions(snapshot);
   renderEdge(snapshot);
+  renderJournal(snapshot);
+  renderGlossary(snapshot);
   renderChartChrome(snapshot);
 
   const selected = snapshot.signals.find((s) => s.index === state.selectedIndex);
@@ -1147,6 +1403,12 @@ function wireControls() {
     if (!state.tableView) { sizeCanvas(); drawChart(); }
   });
 
+  $('glossary-toggle').addEventListener('click', () => {
+    const panel = $('glossary');
+    panel.hidden = !panel.hidden;
+    $('glossary-toggle').textContent = panel.hidden ? 'Show guide' : 'Hide guide';
+  });
+
   $('add-position').addEventListener('click', () => {
     if (!state.snapshot) return;
     const tradable = state.snapshot.signals.filter(
@@ -1194,7 +1456,10 @@ function startClock() {
  *  another script) so the chart can never be left in the previous theme's
  *  palette on the new surface. */
 function watchTheme() {
-  new MutationObserver(() => drawChart()).observe(document.documentElement, {
+  new MutationObserver(() => {
+    drawChart();
+    if (state.snapshot) drawEquity((state.snapshot.history || {}).daily || []);
+  }).observe(document.documentElement, {
     attributes: true, attributeFilter: ['data-theme'],
   });
 }
