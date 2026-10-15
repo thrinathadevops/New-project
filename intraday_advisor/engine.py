@@ -74,6 +74,7 @@ from intraday_advisor.positions import (
     session_summary,
 )
 from intraday_advisor.readings import GLOSSARY, build_playbook, build_readings
+from intraday_advisor.agents import agent_status, build_agents, review_signal
 
 logger = logging.getLogger("engine")
 
@@ -146,11 +147,22 @@ class Engine:
     _announced: set = field(default_factory=set, repr=False)
     _chart_cache: dict = field(default_factory=dict, repr=False)
     _chart_fetched_at: dict = field(default_factory=dict, repr=False)
+    _regime_cache: dict = field(default_factory=dict, repr=False)
+    _regime_fetched_at: float = field(default=0.0, repr=False)
+    _agents: Any = field(default=None, repr=False)
     _costs: Any = None
+
+    # The regime pulls four timeframes, India VIX, four global indices and a
+    # breadth basket. That is far too slow to repeat every refresh, and none of
+    # it changes meaningfully inside a few minutes.
+    regime_ttl: float = 300.0
+    with_breadth: bool = True
 
     def __post_init__(self) -> None:
         if self._costs is None:
             self._costs = fitted_cost_model(self.db_path)
+        if self._agents is None:
+            self._agents = build_agents()
 
     # ------------------------------------------------------------------ config
     def configure(self, **changes) -> None:
@@ -292,6 +304,30 @@ class Engine:
                 ]
         return view
 
+    # ------------------------------------------------------------------ regime
+    def _regime(self, index: str) -> dict:
+        """Market-wide context, cached: slow to build, slow to change."""
+        now = time.time()
+        if self._regime_cache and (now - self._regime_fetched_at) < self.regime_ttl:
+            cached = self._regime_cache.get(index)
+            if cached:
+                return cached
+        try:
+            from intraday_advisor.regime import analyse_market
+            result = analyse_market(index, with_breadth=self.with_breadth).as_dict()
+        except Exception as exc:  # noqa: BLE001 - context must never break the desk
+            logger.warning("Regime analysis failed for %s: %s", index, exc)
+            result = {
+                "index": index, "regime": "UNKNOWN", "bias": "NEUTRAL",
+                "conviction": 0, "alignment": 0.0, "headline": f"{index}: no read",
+                "timeframes": [], "volatility": {}, "breadth": {}, "levels": {},
+                "global_cues": {}, "reasons": [], "invalidation": [],
+                "warnings": [f"Market context unavailable: {exc}"],
+            }
+        self._regime_cache[index] = result
+        self._regime_fetched_at = now
+        return result
+
     # --------------------------------------------------------------- positions
     def _positions(self, signals: list[dict]) -> list[dict]:
         direction_by_index = {s["index"]: s.get("direction", "WAIT") for s in signals}
@@ -427,11 +463,36 @@ class Engine:
         """One complete picture of the market. The only thing any UI renders."""
         started = time.perf_counter()
         signals = [self._analyse_index(index) for index in self.indices]
+
+        # Market-wide context, then the agent review that uses it. The agent
+        # can only hold a trade back, never create or improve one.
+        regimes = {index: self._regime(index) for index in self.indices}
+        for signal in signals:
+            signal["regime"] = regimes.get(signal["index"], {})
         signals.sort(
             key=lambda s: (s.get("direction") != "WAIT", s.get("score") or 0),
             reverse=True,
         )
         positions = self._positions(signals)
+
+        snapshot_so_far = {
+            "ledger": self._ledger_panel(),
+            "settings": {"available_capital": self.available_capital},
+            "mode": "LIVE" if any(s.get("is_live") for s in signals) else "ESTIMATED",
+            "market_open": is_market_open(),
+            "minutes_to_square_off": minutes_to_square_off(),
+        }
+        for signal in signals:
+            try:
+                signal["agent"] = review_signal(
+                    signal, snapshot_so_far, signal.get("regime"),
+                    agents=self._agents,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Agent review failed for %s: %s", signal["index"], exc)
+                signal["agent"] = {"stance": "CAUTION", "summary": f"Review failed: {exc}",
+                                   "concerns": [], "supports": [], "provider": "error",
+                                   "degraded": True}
 
         any_live = any(s.get("is_live") for s in signals)
         market = is_market_open()
@@ -469,7 +530,9 @@ class Engine:
                 "total_pnl": round(session["realised_pnl"] + open_pnl, 2),
                 "capital_free": round(max(0.0, self.available_capital - exposure), 2),
             },
-            "ledger": self._ledger_panel(),
+            "ledger": snapshot_so_far["ledger"],
+            "regimes": regimes,
+            "agent_status": agent_status(),
             # What YOU actually made, as distinct from whether the ENGINE has an
             # edge (that is the ledger block). The two can disagree, and the gap
             # between them is itself worth seeing.

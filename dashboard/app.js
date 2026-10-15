@@ -310,6 +310,7 @@ function signalCard(signal, changed) {
       ${riskStrip(plan)}
       ${warnBlocks}
 
+      ${agentPanel(signal.agent)}
       ${playbookPanel(signal.playbook)}
 
       <details class="why">
@@ -339,6 +340,142 @@ function signalCard(signal, changed) {
     </article>`;
 }
 
+
+
+// ------------------------------------------------------- market direction ---
+
+const REGIME_LABEL = {
+  TRENDING_UP: 'TRENDING UP', TRENDING_DOWN: 'TRENDING DOWN',
+  RANGE: 'RANGE-BOUND', VOLATILE: 'HIGH VOLATILITY', UNKNOWN: 'NO READ',
+};
+const REGIME_TAG = {
+  TRENDING_UP: 'tag--SAFE', TRENDING_DOWN: 'tag--SEVERE',
+  VOLATILE: 'tag--CAUTION', RANGE: 'tag--muted', UNKNOWN: 'tag--muted',
+};
+
+/** Timeframe ladder, slowest first: the slow frames are the context the fast
+ *  ones move inside, so they are read top-down. */
+function timeframeLadder(timeframes) {
+  if (!timeframes || !timeframes.length) {
+    return '<p class="field__hint">No timeframe data.</p>';
+  }
+  const ordered = [...timeframes].reverse();
+  return `<div class="tf-ladder">${ordered.map((tf) => {
+    const width = Math.max(4, (tf.strength || 0) * 50);
+    const left = tf.trend === 'up' ? 50 : tf.trend === 'down' ? 50 - width : 48;
+    const w = tf.trend === 'flat' ? 4 : width;
+    return `
+      <div class="tf-row" title="${escapeHtml(tf.note || '')}">
+        <span class="tf-row__label">${escapeHtml(tf.label)}</span>
+        <span class="tf-row__bar">
+          <span class="tf-row__fill tf-row__fill--${tf.trend}"
+                style="left:${left}%;width:${w}%"></span>
+        </span>
+        <span class="tf-row__state">${escapeHtml(tf.trend)}</span>
+      </div>`;
+  }).join('')}</div>`;
+}
+
+function regimeCard(regime) {
+  const vol = regime.volatility || {};
+  const breadth = regime.breadth || {};
+  const glob = regime.global_cues || {};
+  const levels = regime.levels || {};
+
+  const context = [];
+  if (vol.vix != null) {
+    context.push(`<div class="context-item"><b>${vol.vix}</b><span>India VIX (${escapeHtml(vol.level)})</span></div>`);
+  }
+  if (breadth.pct != null) {
+    context.push(`<div class="context-item"><b>${Math.round(breadth.pct * 100)}%</b><span>heavyweights up${breadth.divergence ? ' ⚠' : ''}</span></div>`);
+  }
+  if (glob.lean && glob.lean !== 'unknown') {
+    context.push(`<div class="context-item"><b>${escapeHtml(glob.lean)}</b><span>global cues</span></div>`);
+  }
+  if (levels.range_position != null) {
+    context.push(`<div class="context-item"><b>${Math.round(levels.range_position * 100)}%</b><span>of day's range</span></div>`);
+  }
+
+  return `
+    <div class="regime regime--${escapeHtml(regime.regime)}">
+      <div class="regime__head">
+        <span class="regime__index">${escapeHtml(regime.index)}</span>
+        <span class="regime__label tag ${REGIME_TAG[regime.regime] || 'tag--muted'}">
+          ${REGIME_LABEL[regime.regime] || regime.regime}</span>
+        <span class="regime__conv">${regime.conviction}% of inputs agree</span>
+      </div>
+      ${timeframeLadder(regime.timeframes)}
+      <div class="context-row">${context.join('')}</div>
+    </div>`;
+}
+
+function regimeDetail(regimes) {
+  return Object.values(regimes).map((regime) => {
+    const vol = regime.volatility || {};
+    const glob = regime.global_cues || {};
+    const cues = (glob.cues || []).filter((c) => c.change_pct != null);
+    return `
+      <div class="card" style="background:var(--surface-2);margin-top:14px">
+        <h3 class="card__title" style="margin-bottom:8px">${escapeHtml(regime.index)} — full read</h3>
+        <ul class="reasons">
+          ${(regime.reasons || []).map((r) => `<li>${escapeHtml(r)}</li>`).join('')}
+        </ul>
+        ${(regime.warnings || []).length ? `<div class="warn-list">${
+          regime.warnings.map((w) => `<div class="warn-item"><span class="warn-item__icon">⚠</span><span>${escapeHtml(w)}</span></div>`).join('')
+        }</div>` : ''}
+        ${vol.meaning ? `<p class="field__hint" style="margin-top:9px">${escapeHtml(vol.meaning)} ${escapeHtml(vol.implication || '')}</p>` : ''}
+        ${cues.length ? `<p class="field__hint" style="margin-top:7px">${
+          cues.map((c) => `${escapeHtml(c.name)} ${c.change_pct > 0 ? '+' : ''}${c.change_pct}%`).join(' · ')
+        }</p>` : ''}
+        ${(regime.invalidation || []).length ? `
+          <div class="invalidation">
+            <b>What would change this read:</b>
+            <ul>${regime.invalidation.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
+          </div>` : ''}
+      </div>`;
+  }).join('');
+}
+
+function renderRegime(snapshot) {
+  const regimes = snapshot.regimes || {};
+  const cards = $('regime-cards');
+  if (!Object.keys(regimes).length) {
+    cards.innerHTML = '<p class="field__hint">Market context loading…</p>';
+    return;
+  }
+  cards.innerHTML = Object.values(regimes).map(regimeCard).join('');
+  $('regime-detail').innerHTML = regimeDetail(regimes);
+
+  const status = snapshot.agent_status || {};
+  setText($('agent-status'), status.provider ? `agent: ${status.provider}` : '');
+  $('agent-status').title = status.detail || '';
+}
+
+// ----------------------------------------------------------- agent verdict ---
+
+const AGENT_ICON = { PROCEED: '✓', CAUTION: '⚠', VETO: '⛔' };
+
+function agentPanel(agent) {
+  if (!agent || !agent.stance) return '';
+  const concerns = (agent.concerns || []).slice(0, 4);
+  const supports = (agent.supports || []).slice(0, 2);
+  return `
+    <div class="agent agent--${escapeHtml(agent.stance)}">
+      <span class="agent__icon">${AGENT_ICON[agent.stance] || '•'}</span>
+      <div class="agent__body">
+        <div class="agent__head">
+          <span class="agent__stance">${escapeHtml(agent.stance)}</span>
+          <span class="agent__by">${escapeHtml(agent.provider || '')}${
+            agent.degraded ? ' · degraded' : ''}</span>
+        </div>
+        <p class="agent__summary">${escapeHtml(agent.summary || '')}</p>
+        ${concerns.length ? `<ul class="agent__list">${
+          concerns.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul>` : ''}
+        ${supports.length ? `<ul class="agent__list" style="opacity:0.75">${
+          supports.map((s) => `<li>✓ ${escapeHtml(s)}</li>`).join('')}</ul>` : ''}
+      </div>
+    </div>`;
+}
 
 // ------------------------------------------------------- live read panel ---
 
@@ -1342,6 +1479,7 @@ function applySnapshot(snapshot) {
   renderSignals(snapshot);
   renderKpis(snapshot);
   renderPositions(snapshot);
+  renderRegime(snapshot);
   renderEdge(snapshot);
   renderJournal(snapshot);
   renderGlossary(snapshot);
@@ -1401,6 +1539,12 @@ function wireControls() {
     $('chart-table').hidden = !state.tableView;
     $('view-toggle').textContent = state.tableView ? 'Chart view' : 'Table view';
     if (!state.tableView) { sizeCanvas(); drawChart(); }
+  });
+
+  $('regime-toggle').addEventListener('click', () => {
+    const panel = $('regime-detail');
+    panel.hidden = !panel.hidden;
+    $('regime-toggle').textContent = panel.hidden ? 'Detail' : 'Hide detail';
   });
 
   $('glossary-toggle').addEventListener('click', () => {

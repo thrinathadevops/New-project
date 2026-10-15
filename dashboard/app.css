@@ -102,6 +102,14 @@
 
 * { box-sizing: border-box; }
 
+/* The browser's own rule for [hidden] is `display: none`, but it lives in the
+   UA stylesheet and loses to ANY author rule that sets display -- so
+   `.edge-grid { display: grid }` silently defeated `hidden` on the glossary,
+   and `.pill { display: inline-flex }` defeated it on the square-off pill.
+   Toggling the attribute then does nothing visible and the button looks dead.
+   This restores the expected behaviour everywhere. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -932,4 +940,119 @@ table.data td.neg { color: var(--critical); font-weight: 600; }
 .gloss__use {
   margin: 0; font-size: 12.5px; line-height: 1.5;
   color: var(--text-primary);
+}
+
+
+/* ================================================== market direction === */
+
+.regime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: var(--gap);
+}
+
+.regime {
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border-left: 3px solid var(--text-muted);
+}
+.regime--TRENDING_UP   { border-left-color: var(--good);     background: var(--good-wash); }
+.regime--TRENDING_DOWN { border-left-color: var(--critical); background: var(--critical-wash); }
+.regime--VOLATILE      { border-left-color: var(--warning);  background: var(--warning-wash); }
+.regime--RANGE         { border-left-color: var(--text-muted); }
+
+.regime__head {
+  display: flex; align-items: baseline; gap: 10px;
+  flex-wrap: wrap; margin-bottom: 10px;
+}
+.regime__index { font-size: 16px; font-weight: 700; }
+.regime__label {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.05em;
+  padding: 3px 9px; border-radius: 999px;
+}
+.regime__conv {
+  margin-left: auto; font-size: 12px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Timeframe ladder: slowest at the top, because it is the context the faster
+   ones move inside. */
+.tf-ladder { display: grid; gap: 3px; margin: 10px 0; }
+.tf-row {
+  display: grid; grid-template-columns: 78px 1fr 56px;
+  align-items: center; gap: 9px; font-size: 12px;
+}
+.tf-row__label { color: var(--text-secondary); }
+.tf-row__bar {
+  position: relative; height: 8px;
+  background: var(--surface-3); border-radius: 2px;
+}
+.tf-row__bar::after {
+  content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px;
+  width: 1px; background: var(--baseline);
+}
+.tf-row__fill {
+  position: absolute; top: 0; bottom: 0; border-radius: 2px;
+  transition: width var(--t-slow) var(--ease), left var(--t-slow) var(--ease);
+}
+.tf-row__fill--up   { background: var(--good); }
+.tf-row__fill--down { background: var(--critical); }
+.tf-row__fill--flat { background: var(--text-muted); }
+.tf-row__state {
+  text-align: right; font-size: 11px; font-weight: 600;
+  color: var(--text-secondary); text-transform: uppercase;
+}
+
+.context-row {
+  display: flex; flex-wrap: wrap; gap: 14px;
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.context-item { display: flex; flex-direction: column; }
+.context-item b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.context-item span {
+  font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.invalidation {
+  margin-top: 10px; padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  font-size: 12px; color: var(--text-secondary);
+}
+.invalidation b { color: var(--text-primary); }
+.invalidation ul { margin: 5px 0 0; padding-left: 17px; }
+.invalidation li { margin: 3px 0; }
+
+/* ======================================================= agent verdict === */
+
+.agent {
+  display: flex; gap: 10px;
+  padding: 11px 13px; margin: 4px 0 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border-left: 3px solid var(--text-muted);
+}
+.agent--VETO    { border-left-color: var(--critical); background: var(--critical-wash); }
+.agent--CAUTION { border-left-color: var(--warning);  background: var(--warning-wash); }
+.agent--PROCEED { border-left-color: var(--good);     background: var(--good-wash); }
+
+.agent__icon { font-size: 16px; flex: none; line-height: 1.3; }
+.agent__body { min-width: 0; }
+.agent__head {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 3px;
+}
+.agent__stance { font-size: 13px; font-weight: 700; letter-spacing: 0.04em; }
+.agent--VETO    .agent__stance { color: var(--critical); }
+.agent--CAUTION .agent__stance { color: var(--warning); }
+.agent--PROCEED .agent__stance { color: var(--good); }
+.agent__by { font-size: 11px; color: var(--text-muted); }
+.agent__summary { font-size: 12.5px; color: var(--text-primary); margin: 0 0 5px; }
+.agent__list { margin: 0; padding-left: 17px; }
+.agent__list li {
+  font-size: 12px; color: var(--text-secondary); margin: 2px 0; line-height: 1.45;
 }

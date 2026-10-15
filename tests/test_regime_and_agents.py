@@ -1,0 +1,399 @@
+"""Tests for the market-regime read and the agent layer.
+
+The agent tests matter most. An agent that can approve or upgrade a trade
+becomes the system's real strategy — unmeasured, unbacktested and
+non-deterministic. The clamp that prevents that is checked from several angles,
+including the case where the agent returns outright garbage.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from intraday_advisor.agents import build_agents, review_signal
+from intraday_advisor.agents.base import (
+    CAUTION,
+    PROCEED,
+    VETO,
+    AgentVerdict,
+    TradeBrief,
+    brief_from_snapshot,
+    combine,
+)
+from intraday_advisor.agents.llm import LLMAgent, _extract_json
+from intraday_advisor.agents.rules import RuleAgent
+from intraday_advisor.regime import (
+    alignment_score,
+    build_regime,
+    classify_breadth,
+    classify_volatility,
+    key_levels,
+    read_timeframe,
+    summarise_global,
+)
+
+
+# =================================================================== regime ==
+
+def trending_frame(direction: int, bars: int = 120, start: float = 100.0) -> pd.DataFrame:
+    """A cleanly trending series, so the EMA read is unambiguous."""
+    drift = 0.002 * direction
+    closes = start * np.exp(np.cumsum(np.full(bars, drift)))
+    index = pd.date_range("2026-01-01 09:15", periods=bars, freq="5min")
+    return pd.DataFrame(
+        {"Open": closes, "High": closes * 1.001, "Low": closes * 0.999,
+         "Close": closes, "Volume": 1000},
+        index=index,
+    )
+
+
+def flat_frame(bars: int = 120) -> pd.DataFrame:
+    closes = np.full(bars, 100.0)
+    index = pd.date_range("2026-01-01 09:15", periods=bars, freq="5min")
+    return pd.DataFrame(
+        {"Open": closes, "High": closes, "Low": closes, "Close": closes,
+         "Volume": 1000},
+        index=index,
+    )
+
+
+def test_read_timeframe_detects_direction():
+    assert read_timeframe(trending_frame(1), "5m", "5 minutes").trend == "up"
+    assert read_timeframe(trending_frame(-1), "5m", "5 minutes").trend == "down"
+    assert read_timeframe(flat_frame(), "5m", "5 minutes").trend == "flat"
+
+
+def test_read_timeframe_needs_enough_bars():
+    assert read_timeframe(trending_frame(1, bars=5), "5m", "5 minutes") is None
+    assert read_timeframe(pd.DataFrame(), "5m", "5 minutes") is None
+
+
+def test_alignment_weights_slower_timeframes_more():
+    """A daily downtrend is the context a 5-minute uptrend moves inside, not
+    the other way round. Unweighted, noise outvotes structure."""
+    fast_up = read_timeframe(trending_frame(1), "5m", "5 minutes")
+    slow_down = read_timeframe(trending_frame(-1), "1d", "Daily")
+
+    score = alignment_score([fast_up, slow_down])
+    assert score < 0           # the daily wins
+
+
+def test_alignment_all_agreeing_is_near_one():
+    reads = [
+        read_timeframe(trending_frame(1), interval, label)
+        for interval, label in (("5m", "5m"), ("15m", "15m"), ("1h", "1h"), ("1d", "1d"))
+    ]
+    assert alignment_score(reads) > 0.9
+    assert alignment_score([]) == 0.0
+
+
+@pytest.mark.parametrize("vix,level", [
+    (10.0, "calm"), (15.0, "normal"), (20.0, "elevated"), (30.0, "high"),
+])
+def test_volatility_bands(vix, level):
+    assert classify_volatility(vix, None)["level"] == level
+
+
+def test_rising_vix_is_called_out():
+    result = classify_volatility(20.0, 12.0)
+    assert "RISING" in result["meaning"]
+    assert "falling markets" in result["meaning"]
+
+
+def test_missing_vix_degrades_safely():
+    result = classify_volatility(None, None)
+    assert result["level"] == "unknown"
+    assert "conservatively" in result["implication"]
+
+
+def test_breadth_states():
+    assert classify_breadth(10, 12)["state"] == "strong"
+    assert classify_breadth(6, 12)["state"] == "mixed"
+    assert classify_breadth(1, 12)["state"] == "very weak"
+    assert classify_breadth(0, 0)["state"] == "unknown"
+
+
+def test_global_lean_is_weighted():
+    cues = [
+        {"name": "S&P 500", "change_pct": -1.5, "weight": 1.0},
+        {"name": "Nikkei", "change_pct": 0.2, "weight": 0.6},
+    ]
+    assert summarise_global(cues)["lean"] == "DOWN"
+    assert summarise_global([])["lean"] == "unknown"
+
+
+def test_key_levels_reports_range_position():
+    daily = pd.DataFrame({
+        "Open": [100, 101], "High": [102, 103], "Low": [99, 100], "Close": [101, 102],
+    }, index=pd.to_datetime(["2026-01-01", "2026-01-02"]))
+    intraday = trending_frame(1, bars=40)
+
+    levels = key_levels(daily, intraday)
+    assert levels["prev_high"] == 102
+    assert levels["prev_low"] == 99
+    assert 0 <= levels["range_position"] <= 1
+    assert "range" in levels["range_note"]
+
+
+def test_aligned_uptrend_is_classified_as_trending_up():
+    frames = {tf: trending_frame(1) for tf in ("5m", "15m", "1h", "1d")}
+    regime = build_regime("NIFTY", frames=frames, vix=13.5, vix_change_pct=-3,
+                          breadth_above=10, breadth_total=12)
+
+    assert regime.regime == "TRENDING_UP"
+    assert regime.bias == "UP"
+    assert regime.conviction > 60
+    assert regime.invalidation, "a read with no falsifier is a horoscope"
+
+
+def test_conflicting_timeframes_are_a_range_not_a_trend():
+    frames = {"5m": trending_frame(1), "15m": trending_frame(1),
+              "1h": trending_frame(-1), "1d": trending_frame(-1)}
+    regime = build_regime("NIFTY", frames=frames)
+
+    assert regime.regime == "RANGE"
+    assert any("range, not a trend" in w for w in regime.warnings)
+
+
+def test_high_vix_overrides_trend_into_volatile():
+    frames = {tf: trending_frame(1) for tf in ("5m", "15m", "1h", "1d")}
+    regime = build_regime("NIFTY", frames=frames, vix=32.0, vix_change_pct=20)
+
+    assert regime.regime == "VOLATILE"
+
+
+def test_breadth_divergence_cuts_conviction():
+    frames = {tf: trending_frame(1) for tf in ("5m", "15m", "1h", "1d")}
+    broad = build_regime("NIFTY", frames=frames, breadth_above=10, breadth_total=12)
+    narrow = build_regime("NIFTY", frames=frames, breadth_above=3, breadth_total=12)
+
+    assert narrow.conviction < broad.conviction
+    assert narrow.breadth["divergence"] is True
+    assert any("Breadth divergence" in w for w in narrow.warnings)
+
+
+def test_global_cues_against_the_local_read_cut_conviction():
+    frames = {tf: trending_frame(1) for tf in ("5m", "15m", "1h", "1d")}
+    agreeing = build_regime("NIFTY", frames=frames, global_cues=[
+        {"name": "S&P 500", "change_pct": 1.2, "weight": 1.0}])
+    opposing = build_regime("NIFTY", frames=frames, global_cues=[
+        {"name": "S&P 500", "change_pct": -1.2, "weight": 1.0}])
+
+    assert opposing.conviction < agreeing.conviction
+    assert any("against" in w for w in opposing.warnings)
+
+
+def test_no_data_is_unknown_not_a_guess():
+    regime = build_regime("NIFTY", frames={})
+    assert regime.regime == "UNKNOWN"
+    assert regime.bias == "NEUTRAL"
+    assert regime.conviction == 0
+
+
+# =================================================================== agents ==
+
+def a_brief(**overrides) -> TradeBrief:
+    base = dict(
+        index="NIFTY", direction="CALL", score=72, contract="23000 CE",
+        entry_premium=100.0, target_premium=125.0, stop_premium=80.0,
+        lots=2, risk_amount=3_100.0, risk_pct_of_capital=0.03, net_rr=1.3,
+        breakeven=101.3, cost_drag=0.013, affordable=True,
+        available_capital=100_000.0, regime="TRENDING_UP", regime_bias="UP",
+        regime_conviction=70, vix=14.0, vix_level="normal", breadth_pct=0.7,
+        global_lean="UP", minutes_to_square_off=180, market_open=True,
+        data_is_live=True, graded_trades=120, measured_expectancy=250.0,
+    )
+    base.update(overrides)
+    return TradeBrief(**base)
+
+
+def test_clean_trade_passes():
+    verdict = RuleAgent().review(a_brief())
+    assert verdict.stance == PROCEED
+    assert verdict.concerns == []
+
+
+@pytest.mark.parametrize("overrides,reason", [
+    ({"breakeven": 130.0}, "cannot profit after costs"),
+    ({"net_rr": 0.8}, "risk exceeds reward"),
+    ({"cost_drag": 0.09}, "costs eat the position"),
+    ({"risk_pct_of_capital": 0.40}, "account cannot survive it"),
+    ({"affordable": False}, "cannot afford one lot"),
+    ({"regime_bias": "DOWN", "regime_conviction": 70}, "fights an aligned trend"),
+    ({"data_is_live": False}, "estimated data is not tradable"),
+    ({"minutes_to_square_off": 0}, "no time left"),
+    ({"measured_expectancy": -180.0}, "measured to lose money"),
+])
+def test_structural_problems_are_vetoed(overrides, reason):
+    verdict = RuleAgent().review(a_brief(**overrides))
+    assert verdict.stance == VETO, f"should veto: {reason}"
+    assert verdict.concerns
+
+
+@pytest.mark.parametrize("overrides", [
+    {"risk_pct_of_capital": 0.12},
+    {"minutes_to_square_off": 10},
+    {"graded_trades": 3, "measured_expectancy": None},
+    {"regime": "RANGE"},
+    {"vix_level": "high", "vix": 30.0},
+    {"breadth_divergence": True},
+    {"global_lean": "DOWN"},
+    {"score": 30},
+])
+def test_contextual_problems_caution_rather_than_block(overrides):
+    verdict = RuleAgent().review(a_brief(**overrides))
+    assert verdict.stance == CAUTION
+    assert verdict.concerns
+
+
+def test_wait_signals_are_not_reviewed():
+    verdict = RuleAgent().review(a_brief(direction="WAIT"))
+    assert verdict.stance == PROCEED
+    assert "nothing to check" in verdict.summary.lower()
+
+
+def test_rule_agent_is_deterministic():
+    """A risk check that changes its mind at random cannot be trusted."""
+    brief = a_brief(risk_pct_of_capital=0.12)
+    first = RuleAgent().review(brief)
+    second = RuleAgent().review(brief)
+    assert (first.stance, first.concerns) == (second.stance, second.concerns)
+
+
+# ------------------------------------------------------- authority clamping --
+
+def test_an_agent_cannot_approve_its_way_past_the_schema():
+    """Any stance outside the three allowed values becomes CAUTION, never
+    PROCEED — a broken agent must not read as approval."""
+    verdict = AgentVerdict(stance="STRONG BUY", confidence=99).clamped(tradable=True)
+    assert verdict.stance == CAUTION
+    assert any("unrecognised stance" in c for c in verdict.concerns)
+
+
+def test_veto_on_a_non_trade_collapses_to_proceed():
+    verdict = AgentVerdict(stance=VETO).clamped(tradable=False)
+    assert verdict.stance == PROCEED
+
+
+def test_confidence_is_clamped_to_range():
+    assert AgentVerdict(stance=PROCEED, confidence=500).clamped(tradable=True).confidence == 100
+    assert AgentVerdict(stance=PROCEED, confidence=-5).clamped(tradable=True).confidence == 0
+
+
+def test_combine_takes_the_most_cautious_stance():
+    """One objection is enough. Averaging would let a confident-but-wrong model
+    talk over a correct objection."""
+    merged = combine([
+        AgentVerdict(stance=PROCEED, provider="a", confidence=90),
+        AgentVerdict(stance=VETO, provider="b", summary="unsafe", confidence=40),
+    ])
+    assert merged.stance == VETO
+    assert merged.summary == "unsafe"
+
+
+def test_combine_with_nothing_is_proceed():
+    assert combine([]).stance == PROCEED
+
+
+# ------------------------------------------------------------- LLM plumbing --
+
+def test_llm_without_a_key_degrades_to_caution_not_proceed():
+    """A silently-succeeding safety layer is decoration."""
+    agent = LLMAgent(provider="groq", api_key="")
+    verdict = agent.review(a_brief())
+
+    assert verdict.stance == CAUTION
+    assert verdict.degraded is True
+    assert "key" in (verdict.error or "").lower()
+
+
+def test_llm_unreachable_endpoint_degrades_to_caution():
+    agent = LLMAgent(provider="ollama", base_url="http://127.0.0.1:1", timeout=1.0)
+    verdict = agent.review(a_brief())
+
+    assert verdict.stance == CAUTION
+    assert verdict.degraded is True
+
+
+def test_extract_json_handles_fences_and_prose():
+    assert _extract_json('{"stance":"VETO"}')["stance"] == "VETO"
+    assert _extract_json('```json\n{"stance":"PROCEED"}\n```')["stance"] == "PROCEED"
+    assert _extract_json('Sure! {"stance":"CAUTION"} hope that helps')["stance"] == "CAUTION"
+    assert _extract_json("no json here") is None
+    assert _extract_json("") is None
+
+
+def test_extract_json_handles_nested_objects():
+    parsed = _extract_json('prose {"stance":"VETO","meta":{"a":1}} trailing')
+    assert parsed["meta"]["a"] == 1
+
+
+# ------------------------------------------------------------ orchestration --
+
+def test_build_agents_defaults_to_rules_only():
+    agents = build_agents("rules")
+    assert len(agents) == 1
+    assert agents[0].name == "rules"
+
+
+def test_build_agents_adds_llm_but_keeps_rules():
+    """The rule checklist always runs: it is free, cannot fail, and catches the
+    mistakes that actually drain accounts."""
+    agents = build_agents("ollama")
+    assert [a.name for a in agents] == ["rules", "llm:ollama"]
+
+
+def test_agents_can_be_disabled():
+    assert build_agents("none") == []
+
+
+def test_review_signal_never_raises_on_a_broken_agent():
+    class Exploding:
+        name = "boom"
+
+        def review(self, brief):
+            raise RuntimeError("kaboom")
+
+    verdict = review_signal(
+        {"direction": "CALL", "plan": {}}, {}, None, agents=[Exploding()]
+    )
+    assert verdict["stance"] == CAUTION
+    assert "kaboom" in verdict["summary"]
+
+
+def test_review_with_agents_disabled_proceeds():
+    verdict = review_signal({"direction": "CALL"}, {}, None, agents=[])
+    assert verdict["stance"] == PROCEED
+
+
+def test_brief_from_snapshot_pulls_the_right_fields():
+    signal = {
+        "index": "NIFTY", "direction": "CALL", "score": 71, "strike": 23000,
+        "option_type": "CE", "entry_premium": 100.0, "target_premium": 125.0,
+        "stop_premium": 80.0,
+        "plan": {"lots": 2, "risk_amount": 3100.0, "risk_pct_of_capital": 0.031,
+                 "net_rr": 1.25, "breakeven": 101.3, "cost_drag": 0.013,
+                 "affordable": True},
+        "readings": [{"label": "EMA", "state": "bullish"}],
+        "warnings": ["something"],
+    }
+    snapshot = {
+        "mode": "LIVE", "market_open": True, "minutes_to_square_off": 120,
+        "settings": {"available_capital": 100000},
+        "ledger": {"performance": {"trades": 50, "expectancy": 180.0}},
+    }
+    regime = {"regime": "TRENDING_UP", "bias": "UP", "conviction": 65,
+              "volatility": {"vix": 14.0, "level": "normal"},
+              "breadth": {"pct": 0.7, "divergence": False},
+              "global_cues": {"lean": "UP"}, "levels": {"range_position": 0.6}}
+
+    brief = brief_from_snapshot(signal, snapshot, regime)
+    assert brief.tradable is True
+    assert brief.contract == "23000 CE"
+    assert brief.regime_bias == "UP"
+    assert brief.vix == 14.0
+    assert brief.graded_trades == 50
+    assert brief.measured_expectancy == 180.0
+    assert brief.data_is_live is True

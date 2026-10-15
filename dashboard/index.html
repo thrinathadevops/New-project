@@ -86,6 +86,25 @@
 
   <div id="mode-banner"></div>
 
+  <!-- ========================================= market direction ======= -->
+  <section class="card" style="margin-top:16px" aria-label="Market direction">
+    <div class="card__head">
+      <h2 class="card__title">Which way is the market leaning?</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="tag tag--muted" id="agent-status"></span>
+        <button id="regime-toggle" class="btn btn--ghost">Detail</button>
+      </div>
+    </div>
+    <div id="regime-cards" class="regime-grid"></div>
+    <div id="regime-detail" hidden></div>
+    <p class="field__hint" style="margin-top:12px">
+      This describes the state the market is <b>in</b>; it does not predict where
+      it goes next. Nothing can. What it is for: the same 5-minute setup is a
+      different proposition with four timeframes aligned and VIX falling than it
+      is against a daily downtrend with VIX spiking.
+    </p>
+  </section>
+
   <!-- ============================================== main grid ========= -->
   <div class="grid-main">
 
