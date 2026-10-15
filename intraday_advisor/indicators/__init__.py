@@ -70,7 +70,14 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     enriched["EMA200"] = ema(enriched["Close"], 200)
     enriched["ATR14"] = atr(enriched, 14)
     enriched["RSI14"] = rsi(enriched["Close"], 14)
-    enriched = enriched.join(macd(enriched["Close"]))
+    # Assigned column-by-column rather than via .join(), which raises
+    # "columns overlap but no suffix specified" when handed an already-enriched
+    # frame. Keeping this idempotent matters because several call paths enrich
+    # before passing data on (the engine builds a chart from the same frame the
+    # analyser scores), and a double-enrich should be harmless, not fatal.
+    macd_frame = macd(enriched["Close"])
+    for column in macd_frame.columns:
+        enriched[column] = macd_frame[column]
     enriched["OBV"] = obv(enriched)
     enriched["VWAP"] = vwap(enriched)
     enriched["Momentum10"] = enriched["Close"] - enriched["Close"].shift(10)

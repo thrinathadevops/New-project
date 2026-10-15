@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intraday Options Desk</title>
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128200;</text></svg>">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ===================================================== topbar ===== -->
+  <header class="topbar">
+    <div class="brand">Options Desk <span id="engine-version"></span></div>
+
+    <div id="mode-pill" class="pill pill--closed">
+      <span class="dot"></span><span id="mode-text">CONNECTING</span>
+    </div>
+
+    <div id="squareoff" class="pill pill--closed" hidden>
+      <span id="squareoff-text"></span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="clock">
+      <span id="clock-time">--:--:--</span>
+      <span id="compute-ms" style="color:var(--text-muted)"></span>
+    </div>
+
+    <button id="theme-toggle" class="icon-btn" title="Switch light / dark"
+            aria-label="Switch light or dark theme">◐</button>
+    <button id="sound-toggle" class="icon-btn" title="Alert sound on / off"
+            aria-label="Toggle alert sound" aria-pressed="false">🔔</button>
+  </header>
+
+  <!-- ============================================ control row ========= -->
+  <!-- One filter row above everything it scopes. -->
+  <section class="controls" aria-label="Capital and risk settings">
+    <div class="field">
+      <label for="capital">Capital available</label>
+      <input id="capital" type="number" min="0" step="1000" value="20000"
+             inputmode="numeric">
+      <span class="field__hint" id="capital-hint">whatever is in the account now</span>
+    </div>
+
+    <div class="field field--range">
+      <label for="deploy">Max deploy — <span id="deploy-val">100%</span></label>
+      <input id="deploy" type="range" min="5" max="100" step="5" value="100">
+      <span class="field__hint" id="deploy-hint">
+        at 100%, a stop costs you the full stop&nbsp;%
+      </span>
+    </div>
+
+    <div class="field">
+      <label for="target">Target %</label>
+      <input id="target" type="number" min="5" max="100" step="5" value="25">
+    </div>
+
+    <div class="field">
+      <label for="stop">Stop %</label>
+      <input id="stop" type="number" min="5" max="60" step="5" value="20">
+    </div>
+
+    <div class="field">
+      <label for="refresh">Refresh</label>
+      <select id="refresh">
+        <option value="5">5 seconds</option>
+        <option value="10" selected>10 seconds</option>
+        <option value="30">30 seconds</option>
+        <option value="60">60 seconds</option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Ledger</label>
+      <label class="switch">
+        <input id="record" type="checkbox" checked>
+        <span class="switch__track"></span>
+        <span class="switch__label">Record signals</span>
+      </label>
+    </div>
+  </section>
+
+  <div id="mode-banner"></div>
+
+  <!-- ============================================== main grid ========= -->
+  <div class="grid-main">
+
+    <div>
+      <section class="signals" id="signals" aria-label="Current signals">
+        <div class="card empty">Waiting for the first snapshot…</div>
+      </section>
+
+      <!-- ---------------------------------------------- chart -------- -->
+      <section class="card chart-card" aria-label="Underlying price chart">
+        <div class="card__head">
+          <div class="chart-tabs" id="chart-tabs" role="tablist"></div>
+          <div style="display:flex;gap:10px;align-items:center">
+            <div class="legend" id="chart-legend"></div>
+            <button id="view-toggle" class="btn btn--ghost">Table view</button>
+          </div>
+        </div>
+
+        <div class="chart-wrap" id="chart-wrap">
+          <canvas id="chart" role="img"
+                  aria-label="Candlestick chart of the selected index with VWAP, EMA 9 and EMA 21"></canvas>
+          <div class="tooltip" id="chart-tooltip" role="status"></div>
+        </div>
+
+        <!-- Table-view twin: every charted value is reachable without colour. -->
+        <div class="table-scroll" id="chart-table" hidden>
+          <table class="data">
+            <thead>
+              <tr>
+                <th>Time</th><th>Open</th><th>High</th><th>Low</th>
+                <th>Close</th><th>VWAP</th><th>EMA 9</th><th>EMA 21</th>
+              </tr>
+            </thead>
+            <tbody id="chart-table-body"></tbody>
+          </table>
+        </div>
+        <p class="field__hint" id="chart-note" style="margin-top:10px"></p>
+      </section>
+    </div>
+
+    <!-- ----------------------------------------------- KPI column ----- -->
+    <aside class="kpis" aria-label="Session summary">
+      <div class="card hero">
+        <div class="hero__label">Session P&amp;L — net of costs</div>
+        <div class="hero__value" id="pnl-total">₹0</div>
+        <div class="hero__sub" id="pnl-sub">no trades yet today</div>
+      </div>
+
+      <div class="card">
+        <h2 class="card__title">Capital</h2>
+        <div class="stat-list">
+          <div class="stat"><span class="stat__label">Deployed</span>
+            <span class="stat__value" id="kpi-exposure">₹0</span></div>
+          <div class="stat"><span class="stat__label">Free</span>
+            <span class="stat__value" id="kpi-free">₹0</span></div>
+          <div class="stat"><span class="stat__label">Open positions</span>
+            <span class="stat__value" id="kpi-open">0</span></div>
+          <div class="stat"><span class="stat__label">Closed today</span>
+            <span class="stat__value" id="kpi-closed">0</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="card__title">Measured edge</h2>
+        <div class="stat-list">
+          <div class="stat"><span class="stat__label">Graded trades</span>
+            <span class="stat__value" id="kpi-graded">0</span></div>
+          <div class="stat"><span class="stat__label">Win rate</span>
+            <span class="stat__value" id="kpi-winrate">—</span></div>
+          <div class="stat"><span class="stat__label">Expectancy / lot</span>
+            <span class="stat__value" id="kpi-expectancy">—</span></div>
+          <div class="stat"><span class="stat__label">Awaiting grade</span>
+            <span class="stat__value" id="kpi-ungraded">0</span></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ============================================== positions ========= -->
+  <section class="card" style="margin-top:16px" aria-label="Open positions">
+    <div class="card__head">
+      <h2 class="card__title">Open positions</h2>
+      <button id="add-position" class="btn btn--primary">+ Add position</button>
+    </div>
+    <div class="table-scroll">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Contract</th><th>Lots</th><th class="num">Entry</th>
+            <th class="num">Now</th><th class="num">Target</th><th class="num">Stop</th>
+            <th class="num">Net P&amp;L</th><th class="num">%</th>
+            <th>Status</th><th>Action</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="positions-body"></tbody>
+      </table>
+    </div>
+    <div id="positions-empty" class="empty">
+      No open positions. Add one when you take a trade and it will be monitored
+      here with a loud alarm at your stop.
+    </div>
+  </section>
+
+  <!-- ================================================== edge ========== -->
+  <section class="card" style="margin-top:16px" aria-label="Edge measurement">
+    <div class="card__head">
+      <h2 class="card__title">Does the score actually pay?</h2>
+      <span class="tag tag--muted" id="edge-engine"></span>
+    </div>
+    <div id="edge-verdict" class="verdict">Loading…</div>
+    <div class="edge-grid" style="margin-top:16px">
+      <div>
+        <h3 class="card__title" style="margin-bottom:9px">By score band</h3>
+        <div class="table-scroll">
+          <table class="data">
+            <thead>
+              <tr><th>Band</th><th class="num">Trades</th><th class="num">Win %</th>
+                  <th class="num">Expectancy</th><th class="num">Avg R</th></tr>
+            </thead>
+            <tbody id="bands-body"></tbody>
+          </table>
+        </div>
+        <p class="field__hint" style="margin-top:9px">
+          If win rate and expectancy do not rise with the band, the score is not
+          ranking trades — and a high-confidence signal deserves no more capital
+          than a low one.
+        </p>
+      </div>
+      <div>
+        <h3 class="card__title" style="margin-bottom:9px">How to read this</h3>
+        <p class="field__hint" style="line-height:1.6">
+          A win here means <b>positive net P&amp;L after all costs</b>, not
+          "target touched" — a +25% target on a ₹2 premium is a net loss once
+          flat brokerage lands.<br><br>
+          Roughly 30 graded trades are needed before any number means anything,
+          and 200+ across 20+ sessions before the weights can be re-fitted.
+          Until then the verdict above will keep saying so.<br><br>
+          Grade a day after 15:30 with
+          <code>python ledger_cli.py grade</code>.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <p class="field__hint" style="margin-top:22px;text-align:center">
+    Decision support, not a profit guarantee. WAIT is a valid and frequent
+    output. Estimated data is never actionable and never enters the statistics.
+  </p>
+</div>
+
+<div class="toasts" id="toasts" role="log" aria-live="polite" aria-label="Alerts"></div>
+<div id="conn-lost" class="conn-lost" hidden>Disconnected — retrying…</div>
+
+<script src="app.js"></script>
+</body>
+</html>

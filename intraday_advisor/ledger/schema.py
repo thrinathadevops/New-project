@@ -48,7 +48,7 @@ DEFAULT_LEDGER_PATH = Path("data/ledger.sqlite")
 
 # Bump when the meaning of a signal's fields or the scoring changes in a way
 # that makes old rows non-comparable with new ones.
-ENGINE_VERSION = "options-v1"
+ENGINE_VERSION = "options-v2"
 # Bump when grading rules change (fill convention, conflict resolution, costs).
 GRADER_VERSION = "grader-v1"
 
@@ -180,6 +180,36 @@ CREATE TABLE IF NOT EXISTS cost_fills (
     implied_half_spread_pct REAL,
     notes             TEXT
 );
+
+-- --------------------------------------------------------------- positions
+-- Open and closed positions you actually took. Separate from ``signals``:
+-- a signal is what the engine thought, a position is what you did. Keeping
+-- them apart is what later allows "did I follow my own system?" to be asked.
+CREATE TABLE IF NOT EXISTS positions (
+    position_id     TEXT PRIMARY KEY,
+    opened_at       TEXT NOT NULL,
+    session_date    TEXT NOT NULL,
+    index_name      TEXT NOT NULL,
+    option_type     TEXT NOT NULL,   -- CE / PE
+    strike          REAL NOT NULL,
+    lot_size        INTEGER NOT NULL,
+    lots            INTEGER NOT NULL,
+    entry_premium   REAL NOT NULL,
+    target_pct      REAL NOT NULL,
+    stop_pct        REAL NOT NULL,
+    option_token    TEXT,
+    -- Links the position to the signal that prompted it, when there was one.
+    signal_id       TEXT,
+    status          TEXT NOT NULL DEFAULT 'OPEN',   -- OPEN / CLOSED
+    closed_at       TEXT,
+    exit_premium    REAL,
+    exit_reason     TEXT,
+    net_pnl         REAL,
+    notes           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+CREATE INDEX IF NOT EXISTS idx_positions_session ON positions(session_date);
 
 -- --------------------------------------------------------------- reporting
 -- Signals joined to outcomes, synthetic data excluded. Every report reads

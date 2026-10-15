@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 
@@ -87,7 +88,11 @@ def order_flow_proxy(df: pd.DataFrame, window: int = 20) -> tuple[str, float]:
     usable = df.tail(window).copy()
     if usable.empty:
         return "insufficient history", 0.0
-    candle_range = (usable["High"] - usable["Low"]).replace(0, pd.NA)
+    # Zero-range (doji / halted) bars would divide by zero, so they are turned
+    # into NaN and then contribute no delta. np.nan rather than pd.NA keeps the
+    # series float dtype -- pd.NA promotes it to object, and the subsequent
+    # fillna then triggers a deprecated object downcast.
+    candle_range = (usable["High"] - usable["Low"]).replace(0, np.nan)
     delta = ((usable["Close"] - usable["Open"]) / candle_range).fillna(0) * usable["Volume"]
     cumulative_delta = float(delta.sum())
     avg_abs = float(delta.abs().mean()) if not delta.empty else 0.0

@@ -317,3 +317,6 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
         "df":           df_oi,
         "error":        None,
     }
+
+
+suggest_index_option = suggest_option_trade

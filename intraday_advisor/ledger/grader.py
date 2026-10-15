@@ -62,6 +62,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from intraday_advisor.data import drop_forming_candle
+from intraday_advisor.fills import resolve_bar_exit
 from intraday_advisor.ledger.costs import OptionsCostModel, net_pnl
 from intraday_advisor.ledger.recorder import now_ist
 from intraday_advisor.ledger.schema import (
@@ -259,38 +260,22 @@ def grade_path(
     mae = fill_premium
 
     for position, (timestamp, bar) in enumerate(eligible.iterrows(), start=1):
-        high = float(bar["High"])
-        low = float(bar["Low"])
-        bar_open = float(bar["Open"])
+        mfe = max(mfe, float(bar["High"]))
+        mae = min(mae, float(bar["Low"]))
 
-        mfe = max(mfe, high)
-        mae = min(mae, low)
-
-        hit_stop = low <= eff_stop
-        hit_target = high >= eff_target
-
-        if hit_stop and hit_target:
-            # RULE 4: cannot know the order; assume the loss.
-            same_bar_conflict = 1
-            outcome = STOP
-            exit_premium = min(eff_stop, bar_open)  # RULE 5
+        # RULES 3, 4 and 5 all live in one shared function, which the
+        # historical backtest calls too -- so the two can never disagree.
+        resolved = resolve_bar_exit(bar, stop=eff_stop, target=eff_target)
+        if resolved.hit:
+            outcome = resolved.reason
+            exit_premium = float(resolved.price)
             exit_time = timestamp
-            exit_reason = "stop (same-bar conflict, resolved pessimistically)"
             bars_held = position
-            break
-        if hit_stop:
-            outcome = STOP
-            exit_premium = min(eff_stop, bar_open)  # RULE 5: gap-down fills worse
-            exit_time = timestamp
-            exit_reason = "stop hit"
-            bars_held = position
-            break
-        if hit_target:
-            outcome = TARGET
-            exit_premium = max(eff_target, bar_open)  # gap-up fills better
-            exit_time = timestamp
-            exit_reason = "target hit"
-            bars_held = position
+            if resolved.conflict:
+                same_bar_conflict = 1
+                exit_reason = "stop (same-bar conflict, resolved pessimistically)"
+            else:
+                exit_reason = "stop hit" if outcome == STOP else "target hit"
             break
 
     # RULE 6: all P&L net of real costs, for exactly one lot.

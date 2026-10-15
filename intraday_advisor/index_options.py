@@ -30,7 +30,13 @@ from intraday_advisor.data import drop_forming_candle
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.strategy import apply_ema_swing_breakout_strategy, ema_swing_breakout_decision
 from intraday_advisor.smart_money import analyze_smart_money
-from intraday_advisor.scoring import ScoreWeights, score_signal
+from intraday_advisor.scoring import (
+    OptionScore,
+    ScoreWeights,
+    SignalScore,
+    score_option_signal,
+    score_signal,
+)
 from intraday_advisor.nse_option_chain import suggest_option_trade
 
 INDEX_CONFIG = {
@@ -71,22 +77,41 @@ class IndexOptionSignal:
     # prices from inside the signal bar, which is look-ahead.
     bar_time: str = ""
     is_live: bool = False
+    # Full traceability: every signed contribution to the score, the raw
+    # feature values it was computed from, and how price and chain related.
+    # The dashboard renders these so a score is never an unexplained number.
+    score_components: dict = field(default_factory=dict)
+    features: dict = field(default_factory=dict)
+    agreement: str = ""
+    underlying_score: int = 0
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()
         return d
 
 
-def _underlying_bias(df: pd.DataFrame) -> tuple[str, int, list[str], list[str]]:
-    """Return (bias, confidence, reasons, warnings) for the index underlying.
+def _num(value, default: float = 0.0) -> float:
+    """Float that is never NaN or infinite, for values destined for JSON."""
+    try:
+        if value is None or pd.isna(value):
+            return default
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if (result != result or result in (float("inf"), float("-inf"))) else result
 
-    Uses the last CLOSED candle only. ``confidence`` is the unified score's
-    distance from neutral, expressed 0-100.
+
+def analyse_underlying(df: pd.DataFrame) -> tuple[SignalScore | None, dict, list[str]]:
+    """Score the index underlying from its last CLOSED candle.
+
+    Returns ``(score, feature_row, warnings)``. The feature row is handed
+    straight to the ledger, so what gets graded is exactly what was scored.
+    ``None`` means there were not enough candles to form a view.
     """
     enriched = apply_ema_swing_breakout_strategy(add_indicators(df))
     usable = enriched.dropna(subset=["Close", "EMA9", "EMA21", "ATR14"])
     if usable.empty:
-        return "neutral", 0, [], ["Not enough candles for underlying trend."]
+        return None, {}, ["Not enough candles for underlying trend."]
 
     last = usable.iloc[-1]
     decision = ema_swing_breakout_decision(enriched.index.name or "INDEX", enriched)
@@ -101,22 +126,23 @@ def _underlying_bias(df: pd.DataFrame) -> tuple[str, int, list[str], list[str]]:
         "Liquidity_Sweep_Bearish": bool(last.get("Liquidity_Sweep_Bearish", False)),
         "SuperTrend_Dir": int(last.get("SuperTrend_Dir", 0)),
         "Adaptive_MACD_Hist": float(last.get("Adaptive_MACD_Hist", 0)),
+        # _num(), not `float(x) or 0`: NaN is truthy in Python, so the `or 0`
+        # idiom lets NaN straight through and it ends up in the JSON payload.
+        "RSI14": _num(last.get("RSI14")),
+        "ATR14": _num(last.get("ATR14")),
+        "VWAP": _num(last.get("VWAP")),
+        "EMA9": _num(last.get("EMA9")),
+        "EMA21": _num(last.get("EMA21")),
+        "EMA200": _num(last.get("EMA200")),
+        "Close": _num(last.get("Close")),
+        "Volume": _num(last.get("Volume")),
+        "ADTV20": _num(last.get("ADTV20")),
     }
     scored = score_signal(
         row, decision_signal=decision.signal, vwap_relation=smart.vwap_relation,
         weights=ScoreWeights.load(),
     )
-
-    if scored.signal_type == "BUY":
-        bias = "bullish"
-    elif scored.signal_type == "SELL":
-        bias = "bearish"
-    else:
-        bias = "neutral"
-    # Confidence as distance from the neutral 50 baseline, scaled to 0-100.
-    confidence = int(min(100, abs(scored.score - 50) * 2))
-    reasons = [f"Underlying: {bias} (score {scored.score})"] + scored.bull + scored.bear
-    return bias, confidence, reasons, list(smart.warnings)
+    return scored, row, list(smart.warnings)
 
 
 def analyze_index_option(
@@ -153,15 +179,14 @@ def analyze_index_option(
             warnings.append(f"Could not fetch underlying candles: {exc}")
             candles = None
 
-    underlying_bias = "neutral"
-    underlying_conf = 0
     bar_time = ""
+    underlying_score: SignalScore | None = None
+    feature_row: dict = {}
     if candles is not None and not candles.empty:
         closed = drop_forming_candle(candles, interval)
         if closed is not None and not closed.empty:
             bar_time = str(closed.index[-1])
-        underlying_bias, underlying_conf, u_reasons, u_warn = _underlying_bias(closed)
-        reasons.extend(u_reasons)
+        underlying_score, feature_row, u_warn = analyse_underlying(closed)
         warnings.extend(u_warn)
     else:
         warnings.append("Underlying trend unavailable; relying on option chain only.")
@@ -177,34 +202,34 @@ def analyze_index_option(
     is_live = "live" in data_source.lower()
     reasons.extend(chain.get("reasons", []))
 
-    # --- 3. confluence: price AND chain must agree ---
-    direction = "WAIT"
-    if underlying_bias == "bullish" and chain_bias in ("CALL", "NEUTRAL"):
-        direction = "CALL"
-    elif underlying_bias == "bearish" and chain_bias in ("PUT", "NEUTRAL"):
-        direction = "PUT"
-    elif chain_bias == "CALL" and underlying_bias != "bearish":
-        direction = "CALL"
-    elif chain_bias == "PUT" and underlying_bias != "bullish":
-        direction = "PUT"
-    else:
-        if underlying_bias != "neutral" and chain_bias not in ("NEUTRAL",):
-            warnings.append(
-                f"Conflict: underlying is {underlying_bias} but option chain says {chain_bias} → WAIT."
-            )
+    # --- 3 & 4. direction + score, both from the ONE scoring engine ---
+    # Previously this block ran its own confluence logic and its own confidence
+    # arithmetic, making it a fourth scorer nothing could trace or calibrate.
+    # Both now come from scoring.score_option_signal, which records every
+    # contribution in ``components``.
+    if underlying_score is None:
+        underlying_score = score_signal({}, weights=ScoreWeights.load())
 
-    # --- 4. confidence: reward agreement, penalise single-sided / conflict ---
-    agree = (
-        (direction == "CALL" and underlying_bias == "bullish" and chain_bias == "CALL")
-        or (direction == "PUT" and underlying_bias == "bearish" and chain_bias == "PUT")
+    option_score = score_option_signal(
+        underlying_score,
+        chain_bias=chain_bias,
+        pcr=float(chain.get("pcr", 0) or 0) or None,
+        spot=spot or None,
+        ce_wall=float(chain.get("max_ce_wall", 0) or 0) or None,
+        pe_wall=float(chain.get("max_pe_wall", 0) or 0) or None,
+        warnings=warnings,
+        weights=ScoreWeights.load(),
     )
-    if direction == "WAIT":
-        confidence = min(40, underlying_conf)
-    elif agree:
-        confidence = min(95, 55 + underlying_conf // 2)
-    else:
-        confidence = min(70, 45 + underlying_conf // 3)
-    confidence = max(0, confidence - len(warnings) * 3)
+    direction = option_score.direction
+    confidence = option_score.score
+    underlying_bias = option_score.underlying_bias
+    warnings = list(option_score.warnings)
+    reasons = (
+        [f"Underlying: {underlying_bias} (price score {underlying_score.score})"]
+        + option_score.bull
+        + option_score.bear
+        + reasons
+    )
 
     # --- 5. option plan on the premium ---
     atm = chain.get("atm", round(spot))
@@ -250,6 +275,10 @@ def analyze_index_option(
         timestamp=datetime.now().isoformat(timespec="seconds"),
         bar_time=bar_time,
         is_live=is_live,
+        score_components=dict(option_score.components),
+        features=dict(feature_row),
+        agreement=option_score.agreement,
+        underlying_score=underlying_score.score,
     )
 
 
