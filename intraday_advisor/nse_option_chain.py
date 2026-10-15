@@ -89,23 +89,30 @@ def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[in
     return filtered
 
 
-def _fetch_ltp_angel(tokens: list[str], smart_api) -> dict[str, float]:
-    """Fetch last traded prices via Angel One getMarketData (MODE_FULL)."""
+def _fetch_market_data_angel(tokens: list[str], smart_api) -> dict[str, dict]:
+    """Fetch LTP **and open interest** via Angel One getMarketData (FULL mode).
+
+    FULL mode already returns ``opnInterest`` per token — the previous version
+    only kept ``ltp`` and hard-coded OI to 0, which broke PCR/max-pain/walls and
+    the scanner's liquidity ranking on live data. Returns
+    ``{token: {"ltp": float, "oi": float}}``. Batches in 50s (the endpoint cap).
+    """
     if not smart_api or not tokens:
         return {}
+    out: dict[str, dict] = {}
     try:
-        # SmartAPI getMarketData accepts a dict of exchange → token list
-        payload = {"NFO": tokens[:50]}   # max 50 per call
-        resp = smart_api.getMarketData("FULL", payload)
-        if not resp.get("status"):
-            return {}
-        fetched = resp.get("data", {}).get("fetched", [])
-        ltp_map = {}
-        for item in fetched:
-            token = str(item.get("symbolToken", ""))
-            ltp   = float(item.get("ltp", 0))
-            ltp_map[token] = ltp
-        return ltp_map
+        for start in range(0, len(tokens), 50):
+            batch = tokens[start:start + 50]
+            resp = smart_api.getMarketData("FULL", {"NFO": batch})
+            if not resp.get("status"):
+                continue
+            for item in resp.get("data", {}).get("fetched", []):
+                token = str(item.get("symbolToken", ""))
+                out[token] = {
+                    "ltp": float(item.get("ltp", 0) or 0),
+                    "oi": float(item.get("opnInterest", item.get("openInterest", 0)) or 0),
+                }
+        return out
     except Exception:
         return {}
 
@@ -187,7 +194,7 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
 
                 if not filtered.empty:
                     tokens = filtered["token"].astype(str).tolist()
-                    ltp_map = _fetch_ltp_angel(tokens, smart)
+                    md = _fetch_market_data_angel(tokens, smart)
 
                     rows = []
                     for s in strikes:
@@ -197,17 +204,20 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
                                           (filtered.get("symbol", "").str.endswith("PE"))]
                         ce_tok = str(ce_row["token"].iloc[0]) if not ce_row.empty else ""
                         pe_tok = str(pe_row["token"].iloc[0]) if not pe_row.empty else ""
+                        ce_md = md.get(ce_tok, {})
+                        pe_md = md.get(pe_tok, {})
                         rows.append({
                             "strike":    s,
-                            "ce_ltp":   ltp_map.get(ce_tok, 0),
-                            "pe_ltp":   ltp_map.get(pe_tok, 0),
-                            "ce_oi":    0,  # OI not in LTP; estimated below
-                            "pe_oi":    0,
+                            "ce_ltp":   ce_md.get("ltp", 0),
+                            "pe_ltp":   pe_md.get("ltp", 0),
+                            "ce_oi":    ce_md.get("oi", 0),   # real OI from FULL feed
+                            "pe_oi":    pe_md.get("oi", 0),
                             "ce_chg_oi": 0,
                             "pe_chg_oi": 0,
                         })
                     df_oi = pd.DataFrame(rows)
-                    data_source = "Angel One LTP (live)"
+                    has_oi = (sum(r["ce_oi"] + r["pe_oi"] for r in rows) > 0)
+                    data_source = "Angel One live (LTP + OI)" if has_oi else "Angel One LTP (live)"
     except Exception:
         pass
 
