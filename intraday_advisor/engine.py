@@ -76,6 +76,14 @@ from intraday_advisor.positions import (
 )
 from intraday_advisor.readings import GLOSSARY, build_playbook, build_readings
 from intraday_advisor.agents import agent_status, build_agents, review_signal
+from intraday_advisor.agents.rules import RuleAgent
+from intraday_advisor.market_calendar import (
+    DEFAULT_MARKET,
+    get_market,
+    list_markets,
+    session_state,
+)
+from intraday_advisor.premarket import brief_notification, build_brief
 
 logger = logging.getLogger("engine")
 
@@ -140,6 +148,8 @@ class Engine:
     stop_pct: float = DEFAULT_STOP_PCT
     interval: str = "5m"
     record: bool = True
+    #: Which exchange's clock drives the session state and the LLM gate.
+    market: str = DEFAULT_MARKET
     db_path: str | Path = DEFAULT_LEDGER_PATH
     indices: tuple[str, ...] = tuple(INDEX_CONFIG)
 
@@ -151,6 +161,7 @@ class Engine:
     _regime_cache: dict = field(default_factory=dict, repr=False)
     _agent_cache: dict = field(default_factory=dict, repr=False)
     _regime_refreshing: bool = field(default=False, repr=False)
+    _announced_briefs: set = field(default_factory=set, repr=False)
     _regime_fetched_at: float = field(default=0.0, repr=False)
     _agents: Any = field(default=None, repr=False)
     _costs: Any = None
@@ -172,7 +183,7 @@ class Engine:
         """Apply settings from the UI. Unknown keys are ignored deliberately,
         so a stale client cannot crash the server with an old field name."""
         for key in ("available_capital", "max_capital_fraction", "target_pct",
-                    "stop_pct", "record"):
+                    "stop_pct", "record", "market"):
             if key in changes and changes[key] is not None:
                 setattr(self, key, changes[key])
 
@@ -306,6 +317,32 @@ class Engine:
                     f"Not recorded: {exc}"
                 ]
         return view
+
+    # -------------------------------------------------------------- premarket
+    def _premarket(self, market_session) -> dict:
+        """Today's news brief, built once per trading day.
+
+        Cached by (market, date) inside :mod:`premarket`, so a ten-second
+        refresh loop does not re-ask the same question all session. Never
+        raises: a missing brief must not take the desk down.
+        """
+        try:
+            brief = build_brief(self.market)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pre-market brief failed: %s", exc)
+            return {"lean": "UNCLEAR", "degraded": True,
+                    "note": f"Brief unavailable: {exc}", "drivers": [],
+                    "watch": [], "caveats": [], "top_headlines": []}
+
+        payload = brief.as_dict()
+        # Announce it once per day, when it first carries a view.
+        key = f"premarket:{brief.market}:{brief.session_date}"
+        if key not in self._announced_briefs and not brief.degraded:
+            note = brief_notification(brief)
+            if note:
+                self._announced_briefs.add(key)
+                payload["_notify"] = note
+        return payload
 
     # ------------------------------------------------------------------ regime
     def _regime(self, index: str) -> dict:
@@ -519,6 +556,12 @@ class Engine:
         )
         positions = self._positions(signals)
 
+        # The LLM gate. Outside the market window there is no live price for a
+        # model to reason about, so calling one spends tokens to learn nothing.
+        # The deterministic rule checklist keeps running either way: it is free.
+        market_session = session_state(self.market)
+        agents = self._agents if market_session.llm_active else [RuleAgent()]
+
         snapshot_so_far = {
             "ledger": self._ledger_panel(),
             "settings": {"available_capital": self.available_capital},
@@ -547,7 +590,7 @@ class Engine:
             try:
                 signal["agent"] = review_signal(
                     signal, snapshot_so_far, signal.get("regime"),
-                    agents=self._agents,
+                    agents=agents,
                 )
                 self._agent_cache[signal["index"]] = (cache_key, signal["agent"])
             except Exception as exc:  # noqa: BLE001
@@ -560,6 +603,19 @@ class Engine:
         market = is_market_open()
         mode = "LIVE" if any_live else ("ESTIMATED" if market else "CLOSED")
         events = self._detect_events(signals, positions, mode)
+
+        # The pre-market brief announces itself once per day as a toast.
+        premarket = self._premarket(market_session)
+        if premarket.pop("_notify", None):
+            events.insert(0, Event(
+                "PREMARKET_BRIEF",
+                {"LEAN_UP": "good", "LEAN_DOWN": "warn",
+                 "UNSTABLE": "danger", "UNCLEAR": "info"}.get(
+                     premarket.get("lean", "UNCLEAR"), "info"),
+                f"Pre-market brief: {premarket.get('lean', 'UNCLEAR').replace('_', ' ')}",
+                premarket.get("headline") or "Headlines gathered for today.",
+                subject=self.market, sticky=True,
+            ))
 
         session = session_summary(db_path=self.db_path)
         open_pnl = round(sum(p.get("net_pnl") or 0 for p in positions), 2)
@@ -594,7 +650,14 @@ class Engine:
             },
             "ledger": snapshot_so_far["ledger"],
             "regimes": regimes,
-            "agent_status": agent_status(),
+            "agent_status": {
+                **agent_status(),
+                "gated_off": not market_session.llm_active,
+                "gate_reason": market_session.llm_reason,
+            },
+            "market_session": market_session.as_dict(),
+            "markets": list_markets(),
+            "premarket": premarket,
             # What YOU actually made, as distinct from whether the ENGINE has an
             # edge (that is the ledger block). The two can disagree, and the gap
             # between them is itself worth seeing.

@@ -342,6 +342,101 @@ function signalCard(signal, changed) {
 
 
 
+
+// ------------------------------------------------------ market & premarket ---
+
+function renderMarketPicker(snapshot) {
+  const select = $('market');
+  const markets = snapshot.markets || [];
+  const current = (snapshot.settings || {}).market
+    || (snapshot.market_session || {}).market;
+
+  if (select.dataset.filled !== '1' && markets.length) {
+    select.innerHTML = markets.map((m) => `
+      <option value="${escapeHtml(m.key)}">
+        ${escapeHtml(m.name)} — ${escapeHtml(m.exchange)} (${escapeHtml(m.open)}-${escapeHtml(m.close)})
+      </option>`).join('');
+    select.dataset.filled = '1';
+  }
+  if (current) select.value = current;
+
+  const session = snapshot.market_session || {};
+  setText($('market-hint'),
+    `${session.local_time ? session.local_time.slice(11, 16) : '--:--'} local · `
+    + `${(session.state || '').replace('_', '-').toLowerCase()}`);
+
+  // The token gate, visible at all times so a silent LLM is never a mystery.
+  const gate = $('llm-gate');
+  const on = !!session.llm_active;
+  gate.className = `pill ${on ? 'pill--gate-on' : 'pill--gate-off'}`;
+  gate.title = session.llm_reason || '';
+  setText($('llm-gate-text'),
+    on ? 'LLM ON'
+       : (session.llm_opens_in_minutes != null
+          ? `LLM in ${session.llm_opens_in_minutes}m`
+          : 'LLM off'));
+}
+
+const LEAN_LABEL = {
+  LEAN_UP: 'LEANS UP', LEAN_DOWN: 'LEANS DOWN',
+  UNSTABLE: 'UNSTABLE', UNCLEAR: 'NO CLEAR LEAN',
+};
+
+function renderPremarket(snapshot) {
+  const brief = snapshot.premarket || {};
+  const body = $('premarket-body');
+  const lean = brief.lean || 'UNCLEAR';
+
+  setText($('premarket-meta'),
+    brief.model ? `${brief.model} · ${brief.headlines_used || 0} headlines`
+                : `${brief.headlines_used || 0} headlines`);
+
+  const drivers = (brief.drivers || []).map((d) => `
+    <div class="driver">
+      <span class="driver__effect driver__effect--${escapeHtml(d.effect || 'volatile')}">
+        ${escapeHtml(d.effect || '?')}</span>
+      <span>
+        <span class="driver__what">${escapeHtml(d.what)}</span>
+        <span class="driver__why">${escapeHtml(d.why)}</span>
+      </span>
+    </div>`).join('');
+
+  const columns = [];
+  if ((brief.watch || []).length) {
+    columns.push(`<div class="brief__col"><h4>Watch today</h4><ul>${
+      brief.watch.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul></div>`);
+  }
+  if ((brief.caveats || []).length) {
+    columns.push(`<div class="brief__col"><h4>What would make this wrong</h4><ul>${
+      brief.caveats.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>`);
+  }
+
+  body.innerHTML = `
+    <div class="brief brief--${escapeHtml(lean)}">
+      <span class="brief__lean">${LEAN_LABEL[lean] || lean}${
+        brief.confidence ? ` ${brief.confidence}%` : ''}</span>
+      <div class="brief__main">
+        <p class="brief__headline">${escapeHtml(
+          brief.headline || brief.note || 'No brief yet.')}</p>
+        ${drivers}
+        ${columns.length ? `<div class="brief__cols">${columns.join('')}</div>` : ''}
+        ${brief.headline ? `<p class="brief__note">${escapeHtml(brief.note || '')}</p>` : ''}
+        ${brief.error ? `<p class="brief__note">⚠ ${escapeHtml(brief.error)}</p>` : ''}
+      </div>
+    </div>`;
+
+  const list = $('premarket-headlines');
+  const headlines = brief.top_headlines || [];
+  list.innerHTML = headlines.length
+    ? headlines.map((h) => `
+        <div class="headline-row">
+          <span class="headline-row__age">${h.age_hours != null ? `${Math.round(h.age_hours)}h` : '—'}</span>
+          <span class="headline-row__src">${escapeHtml(h.source || h.feed || '')}</span>
+          <span class="headline-row__title">${escapeHtml(h.title)}</span>
+        </div>`).join('')
+    : '<p class="field__hint">No headlines retrieved.</p>';
+}
+
 // ------------------------------------------------------- market direction ---
 
 const REGIME_LABEL = {
@@ -1351,6 +1446,7 @@ function send(message) {
 function pushSettings() {
   send({
     type: 'settings',
+    market: $('market').value || undefined,
     available_capital: Number($('capital').value) || 0,
     max_capital_fraction: Number($('deploy').value) / 100,
     target_pct: Number($('target').value) / 100,
@@ -1479,6 +1575,8 @@ function applySnapshot(snapshot) {
   renderSignals(snapshot);
   renderKpis(snapshot);
   renderPositions(snapshot);
+  renderMarketPicker(snapshot);
+  renderPremarket(snapshot);
   renderRegime(snapshot);
   renderEdge(snapshot);
   renderJournal(snapshot);
@@ -1504,6 +1602,7 @@ function wireControls() {
     $(id).addEventListener('change', pushSettings);
   });
   $('refresh').addEventListener('change', pushSettings);
+  $('market').addEventListener('change', pushSettings);
   $('record').addEventListener('change', pushSettings);
 
   const deploy = $('deploy');
@@ -1539,6 +1638,12 @@ function wireControls() {
     $('chart-table').hidden = !state.tableView;
     $('view-toggle').textContent = state.tableView ? 'Chart view' : 'Table view';
     if (!state.tableView) { sizeCanvas(); drawChart(); }
+  });
+
+  $('premarket-toggle').addEventListener('click', () => {
+    const panel = $('premarket-headlines');
+    panel.hidden = !panel.hidden;
+    $('premarket-toggle').textContent = panel.hidden ? 'Headlines' : 'Hide headlines';
   });
 
   $('regime-toggle').addEventListener('click', () => {

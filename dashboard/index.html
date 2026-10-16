@@ -23,6 +23,10 @@
       <span id="squareoff-text"></span>
     </div>
 
+    <div id="llm-gate" class="pill pill--closed" title="">
+      <span id="llm-gate-text">LLM —</span>
+    </div>
+
     <div class="spacer"></div>
 
     <div class="clock">
@@ -39,6 +43,12 @@
   <!-- ============================================ control row ========= -->
   <!-- One filter row above everything it scopes. -->
   <section class="controls" aria-label="Capital and risk settings">
+    <div class="field">
+      <label for="market">Market</label>
+      <select id="market" style="width:200px"></select>
+      <span class="field__hint" id="market-hint">session &amp; LLM window</span>
+    </div>
+
     <div class="field">
       <label for="capital">Capital available</label>
       <input id="capital" type="number" min="0" step="1000" value="20000"
@@ -85,6 +95,20 @@
   </section>
 
   <div id="mode-banner"></div>
+
+  <!-- ========================================== pre-market brief ===== -->
+  <section class="card" id="premarket-card" style="margin-top:16px"
+           aria-label="Pre-market news brief">
+    <div class="card__head">
+      <h2 class="card__title">Today's news — what it suggests</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="tag tag--muted" id="premarket-meta"></span>
+        <button id="premarket-toggle" class="btn btn--ghost">Headlines</button>
+      </div>
+    </div>
+    <div id="premarket-body"></div>
+    <div id="premarket-headlines" hidden></div>
+  </section>
 
   <!-- ========================================= market direction ======= -->
   <section class="card" style="margin-top:16px" aria-label="Market direction">

@@ -362,6 +362,88 @@ def _extract_json(text: str) -> dict | None:
     return None
 
 
+
+def chat_completion(agent, system: str, user: str, *,
+                    max_tokens: int = 1500) -> str:
+    """One chat call, with every provider quirk handled in one place.
+
+    Shared by the risk reviewer and the pre-market brief so a fix lands once.
+    What it handles:
+
+    * ``reasoning_effort="low"`` -- Groq's gpt-oss family spends completion
+      tokens on hidden reasoning BEFORE answering. On a long prompt it spent
+      1598 of 1600 and returned an empty string with ``finish_reason=length``,
+      which looks like a parse failure rather than a truncation. Capping the
+      effort fixes it and cuts token spend about four-fold.
+    * Providers that reject the parameter -- retried once without it.
+    * A rejected model id -- re-discovered and retried.
+    * Overload (429/503) -- retried once.
+    * Empty content with a populated ``reasoning`` field -- read from there.
+    """
+    import requests
+
+    headers = {"Content-Type": "application/json",
+               **getattr(agent, "extra_headers", {})}
+    if agent.api_key:
+        headers["Authorization"] = f"Bearer {agent.api_key}"
+
+    payload = {
+        "model": agent.model,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "reasoning_effort": "low",
+    }
+
+    def post(body: dict):
+        return requests.post(f"{agent.base_url}/chat/completions",
+                             headers=headers, json=body, timeout=agent.timeout)
+
+    response = post(payload)
+
+    # Some providers 400 on an unknown parameter rather than ignoring it.
+    if response.status_code == 400 and "reasoning_effort" in response.text:
+        payload.pop("reasoning_effort", None)
+        response = post(payload)
+
+    if response.status_code in (400, 404):
+        replacement = (_suggested_model(response.text)
+                       or discover_model(agent.base_url, agent.api_key, agent.provider))
+        if replacement and replacement != agent.model:
+            agent.model = replacement
+            payload["model"] = replacement
+            response = post(payload)
+
+    if response.status_code in (429, 503):
+        time.sleep(1.5)
+        response = post(payload)
+        if response.status_code in (429, 503):
+            for alternative in MODEL_PREFERENCES.get(agent.provider, ()):
+                if alternative == agent.model:
+                    continue
+                payload["model"] = alternative
+                response = post(payload)
+                if response.ok:
+                    agent.model = alternative
+                    break
+
+    if not response.ok:
+        raise RuntimeError(f"HTTP {response.status_code}: {response.text[:280]}")
+
+    choice = response.json()["choices"][0]
+    message = choice.get("message", {})
+    content = (message.get("content") or "").strip()
+    if not content:
+        content = (message.get("reasoning") or "").strip()
+    if not content:
+        raise RuntimeError(
+            f"Empty reply (finish_reason={choice.get('finish_reason')}). "
+            f"If 'length', the budget went to reasoning before any answer."
+        )
+    return content
+
+
 class LLMAgent:
     """Risk review via any OpenAI-compatible chat-completions endpoint."""
 

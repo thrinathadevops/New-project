@@ -114,7 +114,9 @@ def add_advanced_candlesticks(df: pd.DataFrame) -> pd.DataFrame:
     is_inside_bar = (high < prev_high) & (low > prev_low)
 
     # Inside Bar Breakout: Prior bar was Inside Bar, current bar breaks and closes above/below Mother Bar
-    prev_inside = is_inside_bar.shift(1).fillna(False)
+    # fillna on an object-dtype boolean series triggers a deprecated
+    # downcast; cast first so the series stays boolean.
+    prev_inside = is_inside_bar.shift(1).astype('boolean').fillna(False).astype(bool)
     mother_high = high.shift(2)
     mother_low = low.shift(2)
     inside_breakout_bull = prev_inside & (close > mother_high)
