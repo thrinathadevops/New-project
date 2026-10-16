@@ -43,16 +43,59 @@ from intraday_advisor.ledger.costs import (
     net_pnl,
 )
 
-# Exchange lot sizes, revised by NSE effective 2024-11-20.
-# NOTE: options_scanner.DEFAULT_LOT_SIZES still carries the pre-revision
-# BANKNIFTY value of 15, which understates capital per lot by ~2.3x.
-LOT_SIZES: dict[str, int] = {
-    "NIFTY": 75,
-    "BANKNIFTY": 35,
-    "FINNIFTY": 65,
-    "MIDCPNIFTY": 140,
+# Fallback lot sizes, used ONLY when the broker's instrument master cannot be
+# read. Do not trust them: checked against Angel's own master on 2026-10-16,
+# every one of these was wrong (NIFTY 75 vs 65, BANKNIFTY 35 vs 30, FINNIFTY
+# 65 vs 60, MIDCPNIFTY 140 vs 120) -- a 13-15% error in capital per lot, risk
+# and P&L for every calculation downstream.
+#
+# The exchange revises lot sizes and the broker publishes the current value;
+# hardcoding it is guessing when the answer is available. lot_size_for() reads
+# the master first and only falls back to this.
+FALLBACK_LOT_SIZES: dict[str, int] = {
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "MIDCPNIFTY": 120,
     "SENSEX": 20,
 }
+
+# Kept as the old public name so existing imports keep working.
+LOT_SIZES = FALLBACK_LOT_SIZES
+
+# index -> lot size, read once from the broker's instrument master.
+_MASTER_CACHE: dict[str, int] = {}
+
+
+def lot_size_from_broker(index: str) -> int | None:
+    """Lot size as the broker publishes it. None if unavailable.
+
+    The instrument master is the authority: it is what the exchange is
+    actually trading today, including any revision this file has not heard
+    about.
+    """
+    key = (index or "").strip().upper()
+    if key in _MASTER_CACHE:
+        return _MASTER_CACHE[key]
+    try:
+        from intraday_advisor.nse_option_chain import _load_instruments
+
+        instruments = _load_instruments().copy()
+        instruments.columns = [c.strip().lower() for c in instruments.columns]
+        rows = instruments[
+            (instruments["name"].astype(str).str.upper() == key)
+            & (instruments["instrumenttype"].astype(str).str.upper() == "OPTIDX")
+        ]
+        if rows.empty:
+            return None
+        # The modal value, so one malformed row cannot set the size.
+        size = int(rows["lotsize"].astype(str).mode().iloc[0])
+        if size > 0:
+            _MASTER_CACHE[key] = size
+            return size
+    except Exception:  # noqa: BLE001 - fall back rather than fail
+        return None
+    return None
 
 # Risk thresholds for warnings, as a fraction of available capital. These are
 # advisory only: nothing here refuses to size a trade.
@@ -118,16 +161,25 @@ class PositionPlan:
 
 
 def lot_size_for(index: str, overrides: dict | None = None) -> int:
-    """Exchange lot size for an index, with optional UI override."""
+    """Lot size for an index: UI override, then the broker, then the fallback.
+
+    The broker's instrument master is consulted first because it is the only
+    source that is current by construction.
+    """
     key = (index or "").strip().upper()
     if overrides and key in overrides:
         return int(overrides[key])
-    if key not in LOT_SIZES:
+
+    from_broker = lot_size_from_broker(key)
+    if from_broker:
+        return from_broker
+
+    if key not in FALLBACK_LOT_SIZES:
         raise ValueError(
             f"Unknown index {key!r}; pass an explicit lot size. "
-            f"Known: {sorted(LOT_SIZES)}"
+            f"Known: {sorted(FALLBACK_LOT_SIZES)}"
         )
-    return LOT_SIZES[key]
+    return FALLBACK_LOT_SIZES[key]
 
 
 def _losses_to_halve(risk_pct: float) -> int:

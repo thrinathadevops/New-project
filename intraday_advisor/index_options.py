@@ -187,6 +187,18 @@ def analyze_index_option(
         chain = suggest_option_trade(index, spot=spot)
     if chain.get("error"):
         warnings.append(chain["error"])
+    # The chain corrects the spot from live option prices (put-call parity);
+    # the candle close is delayed. Adopt the corrected figure so the card, the
+    # OI-wall distances in scoring and the chosen strike all agree.
+    corrected = chain.get("spot")
+    if corrected and "live" in str(chain.get("data_source", "")).lower():
+        try:
+            corrected = float(corrected)
+            if corrected > 0 and (not spot or abs(corrected - spot) < spot * 0.02):
+                spot = corrected
+        except (TypeError, ValueError):
+            pass
+
     chain_bias = chain.get("bias", "NEUTRAL")
     data_source = chain.get("data_source", "unknown")
     is_live = "live" in data_source.lower()

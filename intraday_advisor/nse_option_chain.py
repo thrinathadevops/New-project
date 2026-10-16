@@ -59,6 +59,72 @@ def _get_atm_strikes(spot: float, step: int, n: int = 8) -> list[int]:
     return [int(atm + i * step) for i in range(-n, n + 1)]
 
 
+
+# --------------------------------------------------------------------------- #
+# Broker session reuse
+# --------------------------------------------------------------------------- #
+# A fresh SmartConnect login per chain fetch means 12 logins a minute at a
+# 10-second refresh across two indices, which earns
+# "Access denied because of exceeding access rate" and takes the live feed down
+# mid-session. One session is created and reused until it actually fails.
+
+_SESSION: dict = {"smart": None, "at": 0.0}
+# Angel sessions last hours; an hour is a safe re-login interval.
+_SESSION_TTL = 3600.0
+
+
+def _angel_session(force: bool = False):
+    """A logged-in SmartConnect, reused across calls. None if unavailable."""
+    import time
+
+    api_key = os.getenv("ANGEL_ONE_API_KEY", "")
+    client_code = os.getenv("ANGEL_ONE_CLIENT_CODE", "")
+    pin = os.getenv("ANGEL_ONE_PIN", "")
+    totp_secret = os.getenv("ANGEL_ONE_TOTP_SECRET", "")
+    if not (api_key and client_code and pin and totp_secret):
+        return None
+
+    fresh = (time.time() - _SESSION["at"]) < _SESSION_TTL
+    if _SESSION["smart"] is not None and fresh and not force:
+        return _SESSION["smart"]
+
+    import pyotp
+    from SmartApi import SmartConnect
+
+    smart = SmartConnect(api_key)
+    session = smart.generateSession(client_code, pin, pyotp.TOTP(totp_secret).now())
+    if not session.get("status"):
+        raise RuntimeError(f"Angel One login rejected: {session}")
+
+    _SESSION["smart"] = smart
+    _SESSION["at"] = time.time()
+    return smart
+
+
+def implied_spot_from_chain(df, atm: float) -> float | None:
+    """Spot implied by put-call parity at the ATM strike.
+
+    ``C - P = S - K`` (ignoring carry over an intraday horizon), so the option
+    prices themselves reveal where the underlying is **right now**.
+
+    This matters because the premiums come from the live broker feed while the
+    spot came from Yahoo, which is delayed. Measured live, the gap was ~170
+    BANKNIFTY points -- nearly two strikes, which is enough to pick the wrong
+    ATM contract and quote a plan against the wrong premium.
+    """
+    try:
+        row = df[df["strike"] == atm]
+        if row.empty:
+            return None
+        call = float(row["ce_ltp"].iloc[0])
+        put = float(row["pe_ltp"].iloc[0])
+        if call <= 0 or put <= 0:
+            return None
+        return (call - put) + float(atm)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[int]) -> pd.DataFrame:
     """Filter instrument master for current-week NIFTY/BANKNIFTY options at given strikes."""
     name_col  = "name"
@@ -70,21 +136,46 @@ def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[in
     instruments.columns = [c.strip().lower() for c in instruments.columns]
 
     mask = (
-        (instruments.get(name_col, "").str.upper() == index.upper())
-        & (instruments.get(inst_col, "").str.upper().isin(["OPTIDX", "OPTSTK"]))
-        & (instruments.get(exch_col, "").str.upper() == "NFO")
+        (instruments.get(name_col, "").astype(str).str.upper() == index.upper())
+        & (instruments.get(inst_col, "").astype(str).str.upper().isin(["OPTIDX", "OPTSTK"]))
+        & (instruments.get(exch_col, "").astype(str).str.upper() == "NFO")
     )
     filtered = instruments[mask].copy()
 
     if filtered.empty:
         return filtered
 
-    # strike column may be stored as string with trailing zeros e.g. "22500.00"
+    # --- strike scale ----------------------------------------------------- #
+    # Angel's instrument master stores strikes in PAISE: a 48000 strike is the
+    # string "4800000.000000". Comparing those against [54700, 54800, ...]
+    # matched nothing, every time, so the live chain silently fell back to
+    # synthetic estimates and every premium on screen was fiction.
+    # (tick_stream.resolve_option_token already knew this; this module did not.)
     if strike_col in filtered.columns:
-        filtered[strike_col] = pd.to_numeric(
-            filtered[strike_col], errors="coerce"
-        ).astype("Int64")
+        raw = pd.to_numeric(filtered[strike_col], errors="coerce")
+        # Decide the scale from the data rather than assuming: if the median
+        # strike is ~100x the spot-scale strikes we are looking for, it is paise.
+        target = max(strikes) if strikes else 0
+        median = float(raw.dropna().median()) if raw.notna().any() else 0.0
+        if target and median > target * 10:
+            raw = raw / 100.0
+        filtered[strike_col] = raw.round().astype("Int64")
         filtered = filtered[filtered[strike_col].isin(strikes)]
+
+    if filtered.empty:
+        return filtered
+
+    # --- expiry ----------------------------------------------------------- #
+    # Without this every expiry is returned at once, so one strike appears
+    # several times with different premiums and whichever row lands first wins.
+    # Intraday trading means the NEAREST unexpired contract.
+    if "expiry" in filtered.columns:
+        parsed = pd.to_datetime(filtered["expiry"], format="%d%b%Y", errors="coerce")
+        today = pd.Timestamp.now().normalize()
+        future = parsed[parsed >= today]
+        if not future.empty:
+            nearest = future.min()
+            filtered = filtered[parsed == nearest]
 
     return filtered
 
@@ -176,20 +267,10 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
     live_error: str | None = None
 
     try:
-        api_key     = os.getenv("ANGEL_ONE_API_KEY", "")
-        client_code = os.getenv("ANGEL_ONE_CLIENT_CODE", "")
-        pin         = os.getenv("ANGEL_ONE_PIN", "")
-        totp_secret = os.getenv("ANGEL_ONE_TOTP_SECRET", "")
+        smart = _angel_session()
 
-        if api_key and client_code and pin and totp_secret:
-            import pyotp
-            from SmartApi import SmartConnect
-
-            smart = SmartConnect(api_key)
-            totp  = pyotp.TOTP(totp_secret).now()
-            session = smart.generateSession(client_code, pin, totp)
-
-            if session.get("status"):
+        if smart is not None:
+            if True:
                 instruments = _load_instruments()
                 filtered    = _angel_option_filter(instruments, index, strikes)
 
@@ -232,6 +313,22 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
         data_source = "Estimated (market closed or API unavailable)"
         if live_error:
             data_source = "Estimated (broker call failed)"
+
+    # ── 3b. Correct the spot from the live chain ──────────────────────────
+    # The premiums above are live; the spot came from a delayed source. Put-call
+    # parity at the ATM recovers the real level, and the ATM strike is then
+    # re-chosen from it. Without this the plan can be quoted against a contract
+    # one or two strikes away from the money.
+    spot_source = "delayed feed"
+    if "live" in data_source.lower():
+        implied = implied_spot_from_chain(df_oi, atm)
+        if implied and abs(implied - spot) < spot * 0.02:   # sanity bound
+            if abs(implied - spot) > step / 2:
+                spot = implied
+                atm = round(spot / step) * step
+                spot_source = "implied from live option prices (parity)"
+            else:
+                spot_source = "live feed agrees with the delayed spot"
 
     # ── 4. PCR & Max Pain on OI ───────────────────────────────────────────
     total_pe_oi = max(df_oi["pe_oi"].sum(), 1)
@@ -321,6 +418,7 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
         "atm_pe_oi":    atm_pe_oi,
         "data_source":  data_source,
         "live_error":   live_error,
+        "spot_source":  spot_source,
         "reasons":      reasons,
         "df":           df_oi,
         "error":        None,

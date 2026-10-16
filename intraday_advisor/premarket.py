@@ -175,7 +175,19 @@ def build_brief(
         _CACHE[cache_key] = brief
         return brief
 
-    agent = LLMAgent(provider=status["provider"], timeout=45.0)
+    # "auto" and comma-lists name a CHAIN, not a provider. Building a single
+    # LLMAgent from the literal string "auto" finds no preset, leaving
+    # base_url empty -- which surfaced as
+    # "MissingSchema: Invalid URL '/chat/completions'".
+    chain_names = status.get("chain") or [status["provider"]]
+    if len(chain_names) > 1:
+        from intraday_advisor.agents.llm import ChainAgent
+
+        agent = ChainAgent(chain_names, timeout=45.0).agents[0]
+        fallbacks = ChainAgent(chain_names, timeout=45.0).agents[1:]
+    else:
+        agent = LLMAgent(provider=chain_names[0], timeout=45.0)
+        fallbacks = []
     user_prompt = (
         f"Market: {market.name} ({market.exchange}), opens "
         f"{market.open_time:%H:%M} {market.timezone}.\n"
@@ -185,12 +197,23 @@ def build_brief(
     )
 
     started = datetime.now()
-    try:
-        content = _chat(agent, SYSTEM_PROMPT, user_prompt)
-    except Exception as exc:  # noqa: BLE001
+    content = None
+    failures: list[str] = []
+    for candidate in [agent, *fallbacks]:
+        try:
+            content = _chat(candidate, SYSTEM_PROMPT, user_prompt)
+            agent = candidate
+            break
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{candidate.provider}: {exc}")
+
+    if content is None:
         brief.degraded = True
-        brief.error = f"{type(exc).__name__}: {exc}"
-        brief.note = "The news could not be analysed; the headlines are still listed."
+        brief.error = " | ".join(failures)[:400]
+        brief.note = (
+            f"The news could not be analysed ({len(failures)} provider(s) "
+            f"failed); the headlines are still listed below."
+        )
         _CACHE[cache_key] = brief
         return brief
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from intraday_advisor.ledger.sizing import (
+    FALLBACK_LOT_SIZES,
     LOT_SIZES,
     describe_plan,
     lot_size_for,
@@ -34,11 +35,30 @@ def plan(**overrides):
 
 # ------------------------------------------------------------------ lot sizes
 
-def test_banknifty_lot_size_is_the_post_revision_value():
-    """options_scanner.DEFAULT_LOT_SIZES still has the pre-2024 value of 15,
-    which understates capital per lot by more than 2x."""
-    assert LOT_SIZES["BANKNIFTY"] == 35
-    assert LOT_SIZES["NIFTY"] == 75
+def test_lot_size_prefers_the_broker_over_any_hardcoded_table(monkeypatch):
+    """The broker's instrument master is the only source that is current by
+    construction. Checked live on 2026-10-16, every hardcoded value in this
+    repo was wrong (NIFTY 75 vs 65, BANKNIFTY 35 vs 30) -- a 13-15% error in
+    capital per lot, risk and P&L.
+    """
+    import intraday_advisor.ledger.sizing as sizing
+
+    monkeypatch.setattr(sizing, "lot_size_from_broker", lambda index: 30)
+    assert sizing.lot_size_for("BANKNIFTY") == 30
+
+
+def test_lot_size_falls_back_when_the_broker_is_unreachable(monkeypatch):
+    import intraday_advisor.ledger.sizing as sizing
+
+    monkeypatch.setattr(sizing, "lot_size_from_broker", lambda index: None)
+    assert sizing.lot_size_for("NIFTY") == FALLBACK_LOT_SIZES["NIFTY"]
+
+
+def test_an_explicit_override_beats_everything(monkeypatch):
+    import intraday_advisor.ledger.sizing as sizing
+
+    monkeypatch.setattr(sizing, "lot_size_from_broker", lambda index: 30)
+    assert sizing.lot_size_for("BANKNIFTY", {"BANKNIFTY": 15}) == 15
 
 
 def test_unknown_index_refuses_to_guess():
