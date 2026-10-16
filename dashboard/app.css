@@ -1131,3 +1131,55 @@ table.data td.neg { color: var(--critical); font-weight: 600; }
 .pill--gate-on  { background: var(--good); color: var(--on-good); }
 .pill--gate-off { background: var(--surface-3); color: var(--text-secondary);
                   border-color: var(--border-strong); }
+
+
+/* ================================================ expiry & candidates === */
+
+.expiry-row {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 9px 11px; margin-bottom: 11px;
+  background: var(--surface-2); border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+.expiry-row label {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-muted);
+}
+.expiry-row select {
+  font: inherit; font-size: 12.5px; padding: 5px 9px;
+  color: var(--text-primary); background: var(--surface-3);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+}
+.expiry-row__note { color: var(--text-secondary); font-size: 12px; }
+
+table.cands { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.cands th {
+  text-align: right; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted);
+  padding: 6px 7px; border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+table.cands th:first-child, table.cands td:first-child { text-align: left; }
+table.cands td {
+  padding: 7px; border-bottom: 1px solid var(--grid);
+  font-variant-numeric: tabular-nums; color: var(--text-secondary);
+  text-align: right; white-space: nowrap;
+}
+table.cands tbody tr { transition: background var(--t-fast) var(--ease); }
+table.cands tbody tr:hover { background: var(--surface-2); }
+table.cands tr.cand--aligned td:first-child { border-left: 3px solid var(--good); }
+table.cands tr.cand--counter { opacity: 0.6; }
+table.cands tr.cand--unaffordable { opacity: 0.45; }
+.cand__contract { color: var(--text-primary); font-weight: 600; }
+.cand__tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 1px 6px; border-radius: 999px; margin-left: 5px;
+  background: var(--surface-3); color: var(--text-secondary);
+}
+.cand__tag--ATM { background: var(--accent-deep); color: #fff; }
+.cand__tag--OTM { background: var(--surface-3); color: var(--text-secondary); }
+.cand__tag--ITM { background: var(--surface-3); color: var(--text-muted); }
+.cand__risk--SAFE    { color: var(--good); }
+.cand__risk--CAUTION { color: var(--warning); }
+.cand__risk--SEVERE  { color: var(--critical); }
+
+.pill--ticks-on { background: var(--good); color: var(--on-good); }

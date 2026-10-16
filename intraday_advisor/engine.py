@@ -84,6 +84,8 @@ from intraday_advisor.market_calendar import (
     session_state,
 )
 from intraday_advisor.premarket import brief_notification, build_brief
+from intraday_advisor import live_ticks
+from intraday_advisor.candidates import build_candidates
 
 logger = logging.getLogger("engine")
 
@@ -150,6 +152,10 @@ class Engine:
     record: bool = True
     #: Which exchange's clock drives the session state and the LLM gate.
     market: str = DEFAULT_MARKET
+    #: Expiry to quote against, per index. None = nearest unexpired.
+    expiries: dict = field(default_factory=dict)
+    #: How many alternative contracts to offer per index.
+    candidate_count: int = 8
     db_path: str | Path = DEFAULT_LEDGER_PATH
     indices: tuple[str, ...] = tuple(INDEX_CONFIG)
 
@@ -182,8 +188,14 @@ class Engine:
     def configure(self, **changes) -> None:
         """Apply settings from the UI. Unknown keys are ignored deliberately,
         so a stale client cannot crash the server with an old field name."""
+        if changes.get("expiries"):
+            # Per-index, so NIFTY can sit on a weekly while BANKNIFTY is
+            # necessarily on the monthly.
+            self.expiries.update({
+                str(k).upper(): v for k, v in changes["expiries"].items() if v
+            })
         for key in ("available_capital", "max_capital_fraction", "target_pct",
-                    "stop_pct", "record", "market"):
+                    "stop_pct", "record", "market", "candidate_count"):
             if key in changes and changes[key] is not None:
                 setattr(self, key, changes[key])
 
@@ -251,6 +263,7 @@ class Engine:
             signal = analyze_index_option(
                 index, candles=candles, interval=self.interval,
                 target_pct=self.target_pct, stop_pct=self.stop_pct,
+                expiry=self.expiries.get(index.upper()),
             )
         except Exception as exc:  # noqa: BLE001 - one index must not kill the snapshot
             logger.warning("Analysis failed for %s: %s", index, exc)
@@ -284,6 +297,28 @@ class Engine:
                 view["lot_size"] = lot_size
             except ValueError as exc:
                 view["warnings"] = list(view.get("warnings", [])) + [f"Sizing: {exc}"]
+
+        # --- alternative contracts, so one ATM strike is not the only
+        # option offered. Each is priced and sized at the real capital. ---
+        view["candidates"] = []
+        try:
+            from intraday_advisor.index_options import INDEX_CONFIG
+            from intraday_advisor.nse_option_chain import suggest_option_trade
+
+            chain = suggest_option_trade(
+                index, spot=signal.spot or 0,
+                expiry=self.expiries.get(index.upper()),
+            )
+            view["candidates"] = build_candidates(
+                index, chain, direction=signal.direction,
+                available_capital=self.available_capital,
+                target_pct=self.target_pct, stop_pct=self.stop_pct,
+                lot_size=view.get("lot_size"),
+                step=float(INDEX_CONFIG[index]["step"]),
+                costs=self._costs, limit=self.candidate_count,
+            )
+        except Exception as exc:  # noqa: BLE001 - alternatives are a bonus
+            logger.warning("Candidates failed for %s: %s", index, exc)
 
         # --- plain-language interpretation of the same features that were
         # scored, so a number on screen is never unexplained ---
@@ -414,16 +449,30 @@ class Engine:
         direction_by_index = {s["index"]: s.get("direction", "WAIT") for s in signals}
         spot_by_index = {s["index"]: s.get("spot", 0) for s in signals}
 
+        positions = load_open_positions(db_path=self.db_path)
+
+        # Stream only the contracts actually held: ~1-second updates instead of
+        # waiting for the next 10-second refresh, which is the difference that
+        # matters for a stop alarm.
+        live_ticks.watch([p.option_token for p in positions if p.option_token])
+
         out = []
-        for position in load_open_positions(db_path=self.db_path):
+        for position in positions:
             premium, source = None, "unavailable"
-            try:
-                premium, source = get_option_premium(
-                    position.index_name, position.strike, position.option_type,
-                    spot=spot_by_index.get(position.index_name, 0) or 0,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Premium fetch failed for %s: %s", position.position_id, exc)
+
+            tick_price, tick_age = live_ticks.live_price(position.option_token)
+            if tick_price:
+                premium = tick_price
+                source = f"live tick ({tick_age:.0f}s ago)"
+            else:
+                try:
+                    premium, source = get_option_premium(
+                        position.index_name, position.strike, position.option_type,
+                        spot=spot_by_index.get(position.index_name, 0) or 0,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Premium fetch failed for %s: %s",
+                                 position.position_id, exc)
             out.append(
                 evaluate_live(
                     position,
@@ -657,6 +706,7 @@ class Engine:
             },
             "market_session": market_session.as_dict(),
             "markets": list_markets(),
+            "ticks": live_ticks.status(),
             "premarket": premarket,
             # What YOU actually made, as distinct from whether the ENGINE has an
             # edge (that is the ledger block). The two can disagree, and the gap

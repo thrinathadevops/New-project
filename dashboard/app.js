@@ -310,8 +310,11 @@ function signalCard(signal, changed) {
       ${riskStrip(plan)}
       ${warnBlocks}
 
+      ${expiryPicker(signal)}
       ${agentPanel(signal.agent)}
       ${playbookPanel(signal.playbook)}
+
+      ${candidatesTable(signal)}
 
       <details class="why">
         <summary>Live read — what each indicator is saying now</summary>
@@ -342,6 +345,88 @@ function signalCard(signal, changed) {
 
 
 
+
+
+// ------------------------------------------------------------ candidates ---
+
+function expiryPicker(signal) {
+  const expiries = signal.expiries || [];
+  if (!expiries.length) return '';
+  const current = signal.expiry || '';
+  const chosen = expiries.find((e) => e.label === current);
+  return `
+    <div class="expiry-row">
+      <label for="exp-${escapeHtml(signal.index)}">Expiry</label>
+      <select id="exp-${escapeHtml(signal.index)}" class="expiry-select"
+              data-index="${escapeHtml(signal.index)}">
+        ${expiries.map((e) => `
+          <option value="${escapeHtml(e.label)}" ${e.label === current ? 'selected' : ''}>
+            ${escapeHtml(e.pretty)} · ${e.days}d · ${escapeHtml(e.kind)}
+          </option>`).join('')}
+      </select>
+      <span class="expiry-row__note">${escapeHtml(chosen ? chosen.decay_note : '')}</span>
+    </div>`;
+}
+
+/** Alternative contracts. The engine names one; this shows the other ways to
+ *  express the same view, each priced and sized at the real capital. */
+function candidatesTable(signal) {
+  const rows = signal.candidates || [];
+  if (!rows.length) return '';
+  return `
+    <details class="why">
+      <summary>Other contracts — ${rows.length} ways to trade this</summary>
+      <div class="why__body">
+        <div class="table-scroll">
+          <table class="cands">
+            <thead>
+              <tr>
+                <th>Contract</th><th>Premium</th><th>Lots</th><th>Per lot</th>
+                <th>Risk</th><th>Net R:R</th><th>Breakeven</th><th>Costs</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map((c) => {
+                const klass = !c.affordable ? 'cand--unaffordable'
+                  : c.aligned ? 'cand--aligned' : 'cand--counter';
+                return `
+                <tr class="${klass}" title="${escapeHtml((c.notes || []).join(' · '))}">
+                  <td><span class="cand__contract">${c.strike} ${escapeHtml(c.option_type)}</span>
+                      <span class="cand__tag cand__tag--${escapeHtml(c.moneyness)}">${escapeHtml(c.moneyness)}</span></td>
+                  <td>₹${c.premium.toFixed(2)}</td>
+                  <td>${c.affordable ? c.lots : '—'}</td>
+                  <td>${rupees(c.capital_per_lot)}</td>
+                  <td class="cand__risk--${escapeHtml(c.risk_band)}">${
+                    c.affordable ? percent(c.risk_pct) : 'n/a'}</td>
+                  <td>${c.net_rr.toFixed(2)}</td>
+                  <td>₹${c.breakeven.toFixed(2)}</td>
+                  <td>${percent(c.cost_drag, 2)}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+        <p class="field__hint" style="margin-top:9px">
+          Green edge = agrees with the engine's read; faded = counter-trend or
+          unaffordable at your capital. Further OTM is cheaper and buys more
+          lots, but needs a bigger move and carries higher cost drag. Only the
+          engine's own signal is recorded and graded.
+        </p>
+      </div>
+    </details>`;
+}
+
+function renderTickBadge(snapshot) {
+  const ticks = snapshot.ticks || {};
+  const badge = $('tick-badge');
+  if (!badge) return;
+  const on = !!ticks.connected && (ticks.subscribed || 0) > 0;
+  badge.className = `pill ${on ? 'pill--ticks-on' : 'pill--closed'}`;
+  badge.title = ticks.error
+    ? `${ticks.note || ''} — ${ticks.error}`
+    : (ticks.note || '');
+  setText($('tick-text'), on ? `TICKS ${ticks.subscribed}` : 'TICKS —');
+}
 
 // ------------------------------------------------------ market & premarket ---
 
@@ -627,6 +712,15 @@ function renderSignals(snapshot) {
 
   container.querySelectorAll('.take-trade').forEach((button) => {
     button.addEventListener('click', () => openPositionFromSignal(button.dataset.index));
+  });
+
+  // Expiry is per index: NIFTY can sit on a weekly while BANKNIFTY has only
+  // monthlies available.
+  container.querySelectorAll('.expiry-select').forEach((select) => {
+    select.addEventListener('change', () => {
+      send({ type: 'settings',
+             expiries: { [select.dataset.index]: select.value } });
+    });
   });
 }
 
@@ -1576,6 +1670,7 @@ function applySnapshot(snapshot) {
   renderKpis(snapshot);
   renderPositions(snapshot);
   renderMarketPicker(snapshot);
+  renderTickBadge(snapshot);
   renderPremarket(snapshot);
   renderRegime(snapshot);
   renderEdge(snapshot);

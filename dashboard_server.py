@@ -193,6 +193,8 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
             stop_pct=message.get("stop_pct"),
             record=message.get("record"),
             market=message.get("market"),
+            expiries=message.get("expiries"),
+            candidate_count=message.get("candidate_count"),
         )
         refresh = message.get("refresh_seconds")
         if refresh:

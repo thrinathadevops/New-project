@@ -125,7 +125,72 @@ def implied_spot_from_chain(df, atm: float) -> float | None:
         return None
 
 
-def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[int]) -> pd.DataFrame:
+
+def list_expiries(index: str, limit: int = 8) -> list[dict]:
+    """Upcoming expiries for an index, nearest first.
+
+    Which one you pick changes the trade completely. NIFTY carries weeklies
+    (3 days out) alongside monthlies (11 days); BANKNIFTY is monthly only since
+    the weeklies were withdrawn. A near expiry is cheap and moves fast but
+    bleeds time value by the hour; a far one costs more and decays slower.
+    """
+    try:
+        instruments = _load_instruments().copy()
+        instruments.columns = [c.strip().lower() for c in instruments.columns]
+        rows = instruments[
+            (instruments["name"].astype(str).str.upper() == index.upper())
+            & (instruments["instrumenttype"].astype(str).str.upper() == "OPTIDX")
+        ].copy()
+        if rows.empty:
+            return []
+        rows["_exp"] = pd.to_datetime(rows["expiry"], format="%d%b%Y", errors="coerce")
+        today = pd.Timestamp.now().normalize()
+        rows = rows[rows["_exp"] >= today]
+        if rows.empty:
+            return []
+
+        # The monthly contract is the LAST expiry in its calendar month.
+        # Checking "is there another expiry 7 days later" gets it wrong
+        # whenever the next weekly falls in the following month.
+        all_dates = sorted(rows["_exp"].dropna().unique())
+        last_of_month = {
+            max(d for d in all_dates
+                if (pd.Timestamp(d).year, pd.Timestamp(d).month) == key)
+            for key in {(pd.Timestamp(d).year, pd.Timestamp(d).month)
+                        for d in all_dates}
+        }
+
+        out = []
+        for label, group in rows.groupby("expiry", sort=False):
+            when = group["_exp"].iloc[0]
+            days = int((when - today).days)
+            out.append({
+                "label": str(label),
+                "date": when.strftime("%Y-%m-%d"),
+                "pretty": when.strftime("%a %d %b"),
+                "days": days,
+                "contracts": int(len(group)),
+                "kind": "monthly" if when.to_datetime64() in
+                        {pd.Timestamp(d).to_datetime64() for d in last_of_month}
+                        else "weekly",
+                # Phrased by days-to-expiry, because that is what drives
+                # decay -- a weekly 24 days out behaves like a monthly.
+                "decay_note": (
+                    "expires today - extreme decay, do not buy" if days == 0 else
+                    "1-2 days - cheapest, but bleeds by the hour" if days <= 2 else
+                    "3-9 days - the usual intraday choice" if days <= 9 else
+                    "10-20 days - costlier, decays slower" if days <= 20 else
+                    "far out - expensive, slow decay, poor for intraday"
+                ),
+            })
+        out.sort(key=lambda e: e["days"])
+        return out[:limit]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[int],
+                         expiry: str | None = None) -> pd.DataFrame:
     """Filter instrument master for current-week NIFTY/BANKNIFTY options at given strikes."""
     name_col  = "name"
     inst_col  = "instrumenttype"
@@ -172,6 +237,11 @@ def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[in
     if "expiry" in filtered.columns:
         parsed = pd.to_datetime(filtered["expiry"], format="%d%b%Y", errors="coerce")
         today = pd.Timestamp.now().normalize()
+        if expiry:
+            # An explicitly chosen expiry wins, provided it has not passed.
+            chosen = filtered[filtered["expiry"].astype(str).str.upper() == expiry.upper()]
+            if not chosen.empty:
+                return chosen
         future = parsed[parsed >= today]
         if not future.empty:
             nearest = future.min()
@@ -232,7 +302,8 @@ def _build_synthetic_oi(strikes: list[int], spot: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
+def suggest_option_trade(symbol: str, spot: float = 0.0,
+                         expiry: str | None = None) -> dict:
     """
     Analyse Any Equity/Index option chain and suggest CALL or PUT.
     Tries: Angel One LTP → falls back to synthetic model.
@@ -272,7 +343,7 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
         if smart is not None:
             if True:
                 instruments = _load_instruments()
-                filtered    = _angel_option_filter(instruments, index, strikes)
+                filtered    = _angel_option_filter(instruments, index, strikes, expiry)
 
                 if not filtered.empty:
                     tokens = filtered["token"].astype(str).tolist()
@@ -419,6 +490,9 @@ def suggest_option_trade(symbol: str, spot: float = 0.0) -> dict:
         "data_source":  data_source,
         "live_error":   live_error,
         "spot_source":  spot_source,
+        "expiry":       expiry or (filtered["expiry"].iloc[0]
+                                   if "filtered" in dir() and not filtered.empty else None),
+        "expiries":     list_expiries(index),
         "reasons":      reasons,
         "df":           df_oi,
         "error":        None,

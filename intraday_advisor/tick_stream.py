@@ -105,6 +105,12 @@ class AngelTickStreamer:
         self._thread: threading.Thread | None = None
         self._subscribed: set[str] = set()
         self._connected = False
+        # connect() returns before the socket handshake completes, so a
+        # subscribe sent immediately after start() hits a socket that is not
+        # open yet ("Error occurred during subscribe: socket is already
+        # closed"). Tokens are queued until _on_open flushes them.
+        self._open = False
+        self._pending: set[str] = set()
         self._error: str | None = None
 
     # -- lifecycle -------------------------------------------------------- #
@@ -153,8 +159,11 @@ class AngelTickStreamer:
 
     # -- callbacks -------------------------------------------------------- #
     def _on_open(self, wsapp):
-        if self._subscribed:
-            self._send_subscribe(list(self._subscribed))
+        self._open = True
+        queued = sorted(self._pending | self._subscribed)
+        self._pending.clear()
+        if queued:
+            self._send_subscribe(queued)
 
     def _on_data(self, wsapp, message):
         if isinstance(message, dict):
@@ -165,14 +174,22 @@ class AngelTickStreamer:
 
     def _on_close(self, wsapp):
         self._connected = False
+        self._open = False
+        # Re-subscribe on the next open rather than losing the watch list.
+        self._pending.update(self._subscribed)
 
     # -- subscription ----------------------------------------------------- #
     def subscribe(self, tokens: list[str]) -> None:
         tokens = [str(t) for t in tokens if t]
         new = [t for t in tokens if t not in self._subscribed]
         self._subscribed.update(tokens)
-        if self._ws and new:
+        if not new:
+            return
+        if self._ws and self._open:
             self._send_subscribe(new)
+        else:
+            # Not open yet: queue and let _on_open send it.
+            self._pending.update(new)
 
     def _send_subscribe(self, tokens: list[str]) -> None:
         try:
@@ -188,6 +205,8 @@ class AngelTickStreamer:
     def status(self) -> dict:
         return {
             "connected": self._connected,
+            "socket_open": self._open,
+            "pending": len(self._pending),
             "error": self._error,
             "subscribed": len(self._subscribed),
             "cached": self.cache.size(),

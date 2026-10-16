@@ -85,6 +85,9 @@ class IndexOptionSignal:
     features: dict = field(default_factory=dict)
     agreement: str = ""
     underlying_score: int = 0
+    #: Which expiry this plan is quoted against, and what else is available.
+    expiry: str | None = None
+    expiries: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -144,6 +147,7 @@ def analyze_index_option(
     period: str = "5d",
     target_pct: float = DEFAULT_TARGET_PCT,
     stop_pct: float = DEFAULT_STOP_PCT,
+    expiry: str | None = None,
 ) -> IndexOptionSignal:
     """Full CALL/PUT/WAIT decision for one index.
 
@@ -184,7 +188,7 @@ def analyze_index_option(
     # --- 2. option chain (reuse a pre-fetched one if supplied) ---
     spot = float(candles["Close"].iloc[-1]) if (candles is not None and not candles.empty) else 0.0
     if chain is None:
-        chain = suggest_option_trade(index, spot=spot)
+        chain = suggest_option_trade(index, spot=spot, expiry=expiry)
     if chain.get("error"):
         warnings.append(chain["error"])
     # The chain corrects the spot from live option prices (put-call parity);
@@ -277,6 +281,8 @@ def analyze_index_option(
         timestamp=datetime.now().isoformat(timespec="seconds"),
         bar_time=bar_time,
         is_live=is_live,
+        expiry=chain.get("expiry"),
+        expiries=list(chain.get("expiries") or []),
         score_components=dict(option_score.components),
         features=dict(feature_row),
         agreement=option_score.agreement,
