@@ -40,16 +40,28 @@ class ScoreWeights:
     ema_signal: float = 10.0
     vwap: float = 5.0
 
+    # --- New indicator weights (added by strategy audit) ---
+    # Momentum oscillators
+    adx_trend: float = 5.0         # ADX confirms trending market
+    stochastic: float = 3.0        # Stochastic overbought/oversold
+    mfi: float = 3.0               # Money Flow Index
+    # Volatility structure
+    bollinger: float = 4.0         # Bollinger band position
+    squeeze: float = 5.0           # TTM Squeeze breakout
+    parabolic_sar: float = 4.0     # Parabolic SAR direction
+    # Divergence (high weight — among the most reliable signals)
+    rsi_divergence: float = 8.0    # RSI divergence
+    macd_divergence: float = 7.0   # MACD divergence
+    # Structure
+    ichimoku: float = 5.0          # Ichimoku cloud position
+    # Candlestick patterns
+    candle_pattern: float = 4.0    # Multi-bar candlestick patterns
+    # Volume flow
+    volume_flow: float = 3.0       # CMF / Force Index
+    # MA Ribbon
+    ma_ribbon: float = 4.0         # Moving average ribbon alignment
+
     # --- Option-chain confluence (index options only) ---
-    # Before these existed, ``index_options.analyze_index_option`` layered its
-    # own arithmetic on top of this engine's score (``55 + conf // 2`` and
-    # friends), which made it a FOURTH scorer whose numbers nothing could
-    # trace or calibrate. These weights fold that judgement back in as
-    # ordinary, inspectable components.
-    #
-    # ``chain_conflict`` is deliberately larger than ``chain_agreement``:
-    # price and the chain disagreeing is strong evidence to stand aside, while
-    # them agreeing is only mild evidence to engage. Asymmetric by design.
     chain_agreement: float = 12.0
     chain_conflict: float = 20.0
     pcr_extreme: float = 5.0
@@ -169,6 +181,107 @@ def score_signal(
         add("vwap", w.vwap, bull_msg="Price above VWAP")
     elif vwap_relation == "below VWAP":
         add("vwap", -w.vwap, bear_msg="Price below VWAP")
+
+    # --- ADX trend strength ---
+    adx_val = row.get("ADX", 0) or 0
+    plus_di = row.get("Plus_DI", 0) or 0
+    minus_di = row.get("Minus_DI", 0) or 0
+    if adx_val > 25:
+        if plus_di > minus_di:
+            add("adx_trend", w.adx_trend, bull_msg=f"ADX {adx_val:.0f} confirms bullish trend")
+        elif minus_di > plus_di:
+            add("adx_trend", -w.adx_trend, bear_msg=f"ADX {adx_val:.0f} confirms bearish trend")
+
+    # --- Stochastic ---
+    stoch_k = row.get("Stoch_K", 50) or 50
+    stoch_d = row.get("Stoch_D", 50) or 50
+    if stoch_k < 20 and stoch_k > stoch_d:
+        add("stochastic", w.stochastic, bull_msg="Stochastic bullish cross in oversold")
+    elif stoch_k > 80 and stoch_k < stoch_d:
+        add("stochastic", -w.stochastic, bear_msg="Stochastic bearish cross in overbought")
+
+    # --- MFI (volume-weighted RSI) ---
+    mfi_val = row.get("MFI14", 50) or 50
+    if mfi_val > 80:
+        add("mfi", -w.mfi, bear_msg=f"MFI {mfi_val:.0f} overbought (distribution)")
+    elif mfi_val < 20:
+        add("mfi", w.mfi, bull_msg=f"MFI {mfi_val:.0f} oversold (accumulation)")
+
+    # --- Bollinger Bands ---
+    bb_pctb = row.get("BB_PctB")
+    if bb_pctb is not None:
+        if bb_pctb > 1.0:
+            add("bollinger", -w.bollinger * 0.5, bear_msg="Price above upper Bollinger Band")
+        elif bb_pctb < 0.0:
+            add("bollinger", w.bollinger * 0.5, bull_msg="Price below lower Bollinger Band")
+
+    # --- TTM Squeeze ---
+    squeeze_on = row.get("Squeeze_On", False)
+    squeeze_mom = row.get("Squeeze_Mom", 0) or 0
+    if squeeze_on:
+        # Squeeze is building — don't add direction yet
+        pass
+    elif squeeze_mom > 0:
+        add("squeeze", w.squeeze, bull_msg="Squeeze fired bullish")
+    elif squeeze_mom < 0:
+        add("squeeze", -w.squeeze, bear_msg="Squeeze fired bearish")
+
+    # --- Parabolic SAR ---
+    psar_dir = row.get("PSAR_Dir", 0) or 0
+    if psar_dir == 1:
+        add("parabolic_sar", w.parabolic_sar, bull_msg="Parabolic SAR bullish")
+    elif psar_dir == -1:
+        add("parabolic_sar", -w.parabolic_sar, bear_msg="Parabolic SAR bearish")
+
+    # --- RSI Divergence (high-probability reversal) ---
+    if _truthy(row, "RSI_Div_Bull"):
+        add("rsi_divergence", w.rsi_divergence, bull_msg="Bullish RSI divergence (reversal signal)")
+    elif _truthy(row, "RSI_Div_Bear"):
+        add("rsi_divergence", -w.rsi_divergence, bear_msg="Bearish RSI divergence (reversal signal)")
+    elif _truthy(row, "RSI_Div_Hidden_Bull"):
+        add("rsi_divergence", w.rsi_divergence * 0.6, bull_msg="Hidden bullish RSI divergence (continuation)")
+    elif _truthy(row, "RSI_Div_Hidden_Bear"):
+        add("rsi_divergence", -w.rsi_divergence * 0.6, bear_msg="Hidden bearish RSI divergence (continuation)")
+
+    # --- MACD Divergence ---
+    if _truthy(row, "MACD_Div_Bull"):
+        add("macd_divergence", w.macd_divergence, bull_msg="Bullish MACD divergence")
+    elif _truthy(row, "MACD_Div_Bear"):
+        add("macd_divergence", -w.macd_divergence, bear_msg="Bearish MACD divergence")
+
+    # --- Ichimoku Cloud ---
+    if _truthy(row, "Ichimoku_Above_Cloud"):
+        add("ichimoku", w.ichimoku, bull_msg="Price above Ichimoku cloud")
+    elif _truthy(row, "Ichimoku_Below_Cloud"):
+        add("ichimoku", -w.ichimoku, bear_msg="Price below Ichimoku cloud")
+    if _truthy(row, "Ichimoku_TK_Cross_Bull"):
+        add("ichimoku", w.ichimoku * 0.5, bull_msg="Ichimoku TK bullish cross")
+    elif _truthy(row, "Ichimoku_TK_Cross_Bear"):
+        add("ichimoku", -w.ichimoku * 0.5, bear_msg="Ichimoku TK bearish cross")
+
+    # --- Multi-bar candlestick patterns ---
+    if _truthy(row, "Morning_Star") or _truthy(row, "Three_White_Soldiers") or _truthy(row, "Three_Inside_Up"):
+        add("candle_pattern", w.candle_pattern, bull_msg="Bullish multi-bar candle pattern")
+    elif _truthy(row, "Evening_Star") or _truthy(row, "Three_Black_Crows") or _truthy(row, "Three_Inside_Down"):
+        add("candle_pattern", -w.candle_pattern, bear_msg="Bearish multi-bar candle pattern")
+    elif _truthy(row, "Tweezer_Bottom") or _truthy(row, "Bullish_Harami"):
+        add("candle_pattern", w.candle_pattern * 0.5, bull_msg="Bullish reversal candle pattern")
+    elif _truthy(row, "Tweezer_Top") or _truthy(row, "Bearish_Harami"):
+        add("candle_pattern", -w.candle_pattern * 0.5, bear_msg="Bearish reversal candle pattern")
+
+    # --- Volume flow (CMF + Force Index) ---
+    cmf = row.get("CMF20", 0) or 0
+    force = row.get("Force_Index", 0) or 0
+    if cmf > 0.1 and force > 0:
+        add("volume_flow", w.volume_flow, bull_msg="Buying pressure (CMF + Force Index positive)")
+    elif cmf < -0.1 and force < 0:
+        add("volume_flow", -w.volume_flow, bear_msg="Selling pressure (CMF + Force Index negative)")
+
+    # --- MA Ribbon ---
+    if _truthy(row, "Ribbon_Bullish"):
+        add("ma_ribbon", w.ma_ribbon, bull_msg="MA Ribbon fully bullish (all 8 EMAs aligned)")
+    elif _truthy(row, "Ribbon_Bearish"):
+        add("ma_ribbon", -w.ma_ribbon, bear_msg="MA Ribbon fully bearish (all 8 EMAs aligned)")
 
     confidence = int(max(0, min(100, round(score))))
     if confidence >= buy_threshold:

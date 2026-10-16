@@ -5,6 +5,13 @@ from .base import registry
 # Load the custom indicators so they register themselves
 from . import smart_money_concepts
 from . import trend_oscillators
+from . import momentum_oscillators
+from . import volatility_bands
+from . import volume_analysis
+from . import structure_levels
+from . import candlestick_patterns
+from . import divergence_detection
+from . import ma_ribbon
 
 # Keep the base indicators from indicators_old to supply ATR, Swing High, SMA, etc.
 def sma(series: pd.Series, window: int) -> pd.Series:
