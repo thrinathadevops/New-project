@@ -136,27 +136,48 @@ class Broadcaster:
         self._wake.set()
 
     async def stream_ticks(self, every: float = 1.5) -> None:
-        """Push live index prices between snapshots.
+        """Push live prices -- index spot *and* open positions -- between
+        snapshots.
 
-        A snapshot is ~105 KB and takes seconds to build; a tick payload is a
-        few dozen bytes. Sending them on the same cadence would mean either a
-        stale chart or a pointless amount of work, so they run on separate
-        clocks: heavy analysis occasionally, prices continuously.
+        A snapshot is ~105 KB and takes seconds to build; this payload is a few
+        hundred bytes of pure cache reads. Sending them on the same cadence
+        would mean either a stale screen or a pointless amount of work, so they
+        run on separate clocks: heavy analysis occasionally, prices
+        continuously.
+
+        Positions ride this clock because that is the panel where a cold number
+        costs money. Their P&L, status and alarms are computed by the engine
+        (the same code the snapshot uses), never in the browser.
         """
         from intraday_advisor import index_ticks
+
+        def gather() -> dict:
+            # One hop to the worker thread for both: two would double the
+            # scheduling overhead of the most frequent loop in the process.
+            payload = {"type": "ticks",
+                       "prices": index_ticks.latest(self.engine.indices)}
+            try:
+                payload.update(self.engine.tick_positions())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Tick position update failed: %s", exc)
+            return payload
 
         while True:
             await asyncio.sleep(every)
             if not clients:
                 continue
             try:
-                prices = await asyncio.to_thread(
-                    index_ticks.latest, self.engine.indices
-                )
+                payload = await asyncio.to_thread(gather)
             except Exception:  # noqa: BLE001 - a tick must never break the loop
                 continue
-            if prices:
-                await self.broadcast({"type": "ticks", "prices": prices})
+            if payload.get("prices") or payload.get("positions") is not None:
+                await self.broadcast(payload)
+                # An alarm found here must reach the rest of the system too --
+                # the risk governor and the stale-row cleanup live in the
+                # snapshot, so pull one forward rather than waiting out the
+                # interval.
+                if payload.get("events"):
+                    self.request_refresh()
 
     async def run(self) -> None:
         while True:

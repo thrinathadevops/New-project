@@ -1203,3 +1203,35 @@ table.data td.sym {
   background: var(--accent); margin-right: 6px;
   animation: pulse-dot 1.2s var(--ease) infinite;
 }
+
+/* ============================================ live position cells ======= */
+
+/* A cell whose number just moved. Deliberately a background wash rather than
+   a colour change on the text: the text colour already carries sign (profit /
+   loss), and overloading it would make a flash read as a reversal. */
+@keyframes cell-flash {
+  from { background: color-mix(in oklab, var(--accent) 26%, transparent); }
+  to   { background: transparent; }
+}
+td.cell-flash {
+  animation: cell-flash 700ms var(--ease) 1;
+  border-radius: 4px;
+}
+
+/* The premium cell marks a socket price so an exit decision is not made on a
+   number that silently stopped updating. */
+.prem--live::after {
+  content: '';
+  display: inline-block;
+  width: 5px; height: 5px;
+  margin-left: 5px;
+  vertical-align: 1px;
+  border-radius: 50%;
+  background: var(--good);
+  animation: pulse-dot 1.6s var(--ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  td.cell-flash { animation-duration: 1ms; }
+  .prem--live::after { animation: none; }
+}

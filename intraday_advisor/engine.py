@@ -172,6 +172,10 @@ class Engine:
     _agent_cache: dict = field(default_factory=dict, repr=False)
     _regime_refreshing: bool = field(default=False, repr=False)
     _announced_briefs: set = field(default_factory=set, repr=False)
+    # Carried between snapshots so the fast tick clock can re-price positions
+    # without repeating a snapshot's network work. See tick_positions().
+    _last_premiums: dict = field(default_factory=dict, repr=False)
+    _last_directions: dict = field(default_factory=dict, repr=False)
     _regime_fetched_at: float = field(default=0.0, repr=False)
     _agents: Any = field(default=None, repr=False)
     _costs: Any = None
@@ -485,6 +489,8 @@ class Engine:
         # matters for a stop alarm.
         live_ticks.watch([p.option_token for p in positions if p.option_token])
 
+        self._last_directions = direction_by_index
+
         out = []
         for position in positions:
             premium, source = None, "unavailable"
@@ -502,6 +508,12 @@ class Engine:
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Premium fetch failed for %s: %s",
                                  position.position_id, exc)
+
+            # Kept so the tick clock can fall back to the last known price
+            # instead of blanking a row it has no fresh tick for.
+            if premium and premium > 0:
+                self._last_premiums[position.position_id] = (premium, source)
+
             out.append(
                 evaluate_live(
                     position,
@@ -514,6 +526,98 @@ class Engine:
                 ).as_dict()
             )
         return out
+
+    # ---------------------------------------------------- positions, tick clock
+    def tick_positions(self) -> dict:
+        """Re-price open positions from ticks alone, for the fast channel.
+
+        Why this exists
+        ---------------
+        A snapshot already values positions from the tick cache, but a snapshot
+        only lands every 10-20 seconds, so the P&L you read was a live price
+        that had gone cold on screen. The chart was given a 1.5s tick channel;
+        the positions table is the panel where a stale number actually costs
+        money, so it rides the same clock.
+
+        What it deliberately does **not** do
+        ------------------------------------
+        * **No REST.** A premium fetch every 1.5s would hit the broker's rate
+          limiter within minutes (measured: repeated candle fetches earned
+          "Access denied because of exceeding access rate"). Ticks only.
+        * **No status logic of its own.** It calls the same
+          :func:`evaluate_live` the snapshot calls, so the stop alarm cannot
+          mean one thing on the fast path and another on the slow one. A second
+          copy of that arithmetic in JavaScript was the alternative, and two
+          copies drift.
+        * **No writes.** Reading the ledger is cheap and local; recording stays
+          with the snapshot and with explicit operator actions.
+
+        A row with no fresh tick keeps the last price the snapshot obtained,
+        still labelled with where that price came from, rather than collapsing
+        to NO_DATA and flickering.
+        """
+        positions = load_open_positions(db_path=self.db_path)
+        if not positions:
+            # Reported explicitly: an empty list is a real state (all closed),
+            # and the browser has to clear the table rather than hold old rows.
+            return {"positions": [], "events": [], "priced": 0, "total": 0}
+
+        live_ticks.watch([p.option_token for p in positions if p.option_token])
+
+        rows, priced = [], 0
+        for position in positions:
+            tick_price, tick_age = live_ticks.live_price(position.option_token)
+            if tick_price:
+                premium = tick_price
+                source = f"live tick ({tick_age:.0f}s ago)"
+                priced += 1
+            else:
+                premium, source = self._last_premiums.get(
+                    position.position_id, (None, "unavailable")
+                )
+            rows.append(
+                evaluate_live(
+                    position,
+                    current_premium=premium if premium and premium > 0 else None,
+                    premium_source=source,
+                    underlying_direction=self._last_directions.get(
+                        position.index_name, "WAIT"
+                    ),
+                    costs=self._costs,
+                ).as_dict()
+            )
+
+        return {
+            "positions": rows,
+            # Alarms go through the same dedupe set as the snapshot's, so a
+            # stop found on the tick clock is announced once, by whichever
+            # path saw it first -- which is the point of running this often.
+            "events": [e.as_dict() for e in self._position_events(rows)],
+            "priced": priced,
+            "total": len(rows),
+        }
+
+    def _position_events(self, positions: list[dict]) -> list[Event]:
+        """Target/stop/warning alarms for already-evaluated position rows."""
+        events: list[Event] = []
+        for position in positions:
+            if position["status"] not in ("TARGET_HIT", "STOP_HIT", "WARNING"):
+                continue
+            key = f"{position['position_id']}:{position['status']}"
+            if key in self._announced:
+                continue
+            self._announced.add(key)
+            events.append(Event(
+                f"POSITION_{position['status'].replace('_HIT', '')}",
+                {"TARGET_HIT": "good", "STOP_HIT": "danger",
+                 "WARNING": "warn"}[position["status"]],
+                f"{position['index_name']} {position['strike']:g} "
+                f"{position['option_type']} — {position['action']}",
+                position["message"],
+                subject=position["position_id"],
+                sticky=position["status"] in ("STOP_HIT", "TARGET_HIT"),
+            ))
+        return events
 
     # ------------------------------------------------------------------ events
     def _detect_events(
@@ -571,24 +675,9 @@ class Engine:
                     subject=index,
                 ))
 
-        for position in positions:
-            key = f"{position['position_id']}:{position['status']}"
-            if position["status"] in ("TARGET_HIT", "STOP_HIT", "WARNING"):
-                if key in self._announced:
-                    continue
-                self._announced.add(key)
-                severity = {
-                    "TARGET_HIT": "good", "STOP_HIT": "danger", "WARNING": "warn",
-                }[position["status"]]
-                events.append(Event(
-                    f"POSITION_{position['status'].replace('_HIT', '')}",
-                    severity,
-                    f"{position['index_name']} {position['strike']:g} "
-                    f"{position['option_type']} — {position['action']}",
-                    position["message"],
-                    subject=position["position_id"],
-                    sticky=position["status"] in ("STOP_HIT", "TARGET_HIT"),
-                ))
+        # Same helper the tick clock uses, sharing the same dedupe set: an
+        # alarm is announced once by whichever path reached it first.
+        events.extend(self._position_events(positions))
 
         remaining = minutes_to_square_off()
         if remaining is not None and remaining <= 15 and positions:

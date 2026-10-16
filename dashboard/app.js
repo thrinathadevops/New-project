@@ -864,6 +864,99 @@ function renderEdge(snapshot) {
     </tr>`).join('');
 }
 
+// Status presentation lives in one place: the full render and the 1.5s live
+// update must never disagree about what a stop-out looks like.
+const POS_TAG = {
+  TARGET_HIT: 'tag--SAFE', STOP_HIT: 'tag--SEVERE', WARNING: 'tag--CAUTION',
+  ON_TRACK: 'tag--SAFE', NO_DATA: 'tag--muted',
+};
+const POS_ICON = {
+  TARGET_HIT: '\u{1F3AF}', STOP_HIT: '\u{1F6A8}', WARNING: '\u26A0',
+  ON_TRACK: '\u2713', NO_DATA: '\u2014',
+};
+
+const pnlClass = (v) => (v > 0 ? 'pos' : v < 0 ? 'neg' : '');
+
+/** The current premium, plus an honest marker of where it came from.
+ *
+ *  A price from the tick socket and the last price a REST call managed are not
+ *  the same thing, and on an exit decision the difference matters, so the cell
+ *  says which it is instead of showing a bare number.
+ */
+function premiumCell(position) {
+  if (position.current_premium === null || position.current_premium === undefined) {
+    return '\u2014';
+  }
+  const isTick = (position.premium_source || '').startsWith('live tick');
+  return `<span class="prem${isTick ? ' prem--live' : ''}">\u20B9${
+    position.current_premium.toFixed(2)}</span>`;
+}
+
+/** Re-price the open rows in place, on the tick clock.
+ *
+ *  Deliberately not a full re-render: replacing the table's innerHTML every
+ *  1.5s would destroy the Close button between a mousedown and its mouseup,
+ *  so the one click that has to work would be the one that silently does not.
+ *  Only the cells whose numbers moved are touched.
+ */
+function updatePositionsLive(positions) {
+  const body = $('positions-body');
+  if (!body) return;
+
+  const shown = Array.from(body.querySelectorAll('tr[data-pos]'))
+    .map((tr) => tr.dataset.pos);
+  const incoming = positions.map((p) => p.position_id);
+  if (shown.length !== incoming.length
+      || shown.some((id, i) => id !== incoming[i])) {
+    // A position was opened or closed: structure changed, so rebuild.
+    renderPositions(state.snapshot);
+    return;
+  }
+
+  for (const position of positions) {
+    const row = body.querySelector(
+      `tr[data-pos="${CSS.escape(position.position_id)}"]`);
+    if (!row) continue;
+    const net = position.net_pnl || 0;
+
+    setCell(row, 'premium', premiumCell(position), {
+      html: true, title: position.premium_source || '',
+    });
+    setCell(row, 'net', rupees(net, { sign: true }), { cls: pnlClass(net) });
+    setCell(row, 'pnlpct', percent(position.pnl_pct),
+      { cls: pnlClass(position.pnl_pct) });
+    setCell(row, 'status',
+      `<span class="tag ${POS_TAG[position.status] || 'tag--muted'}">${
+        POS_ICON[position.status] || ''} ${escapeHtml(
+        position.status.replace('_', ' '))}</span>`, { html: true });
+    setCell(row, 'action', position.action);
+
+    row.classList.toggle('pos-row--alarm', Boolean(position.is_alarm));
+    const button = row.querySelector('.close-position');
+    if (button) button.dataset.premium = position.current_premium ?? '';
+  }
+}
+
+/** Write a cell only when its content actually changed, and flash it if so. */
+function setCell(row, field, content, { html = false, cls = null, title = null } = {}) {
+  const cell = row.querySelector(`[data-field="${field}"]`);
+  if (!cell) return;
+  const next = html ? content : String(content);
+  const current = html ? cell.innerHTML.trim() : cell.textContent.trim();
+  if (cls !== null) {
+    cell.classList.remove('pos', 'neg');
+    if (cls) cell.classList.add(cls);
+  }
+  if (title !== null) cell.title = title;
+  if (current === next.trim()) return;      // no change: no DOM write, no flash
+
+  if (html) cell.innerHTML = next; else cell.textContent = next;
+  // A number that moved should catch the eye; one that did not should not.
+  cell.classList.remove('cell-flash');
+  void cell.offsetWidth;                    // restart the animation
+  cell.classList.add('cell-flash');
+}
+
 function renderPositions(snapshot) {
   const body = $('positions-body');
   const empty = $('positions-empty');
@@ -878,33 +971,30 @@ function renderPositions(snapshot) {
 
   body.innerHTML = positions.map((position) => {
     const net = position.net_pnl || 0;
-    const statusTag = {
-      TARGET_HIT: 'tag--SAFE', STOP_HIT: 'tag--SEVERE',
-      WARNING: 'tag--CAUTION', ON_TRACK: 'tag--SAFE', NO_DATA: 'tag--muted',
-    }[position.status] || 'tag--muted';
-    const icon = {
-      TARGET_HIT: '🎯', STOP_HIT: '🚨', WARNING: '⚠', ON_TRACK: '✓', NO_DATA: '—',
-    }[position.status] || '';
+    const statusTag = POS_TAG[position.status] || 'tag--muted';
+    const icon = POS_ICON[position.status] || '';
 
     return `
-      <tr class="${position.is_alarm ? 'pos-row--alarm' : ''}">
+      <tr data-pos="${escapeHtml(position.position_id)}"
+          class="${position.is_alarm ? 'pos-row--alarm' : ''}">
         <td style="color:var(--text-primary);font-weight:600">
           ${escapeHtml(position.index_name)} ${position.strike}
           ${escapeHtml(position.option_type)}
         </td>
         <td class="num">${position.lots}×${position.lot_size}</td>
         <td class="num">₹${position.entry_premium.toFixed(2)}</td>
-        <td class="num">${position.current_premium === null
-          ? '—' : `₹${position.current_premium.toFixed(2)}`}</td>
+        <td class="num" data-field="premium"
+            title="${escapeHtml(position.premium_source || '')}">${
+          premiumCell(position)}</td>
         <td class="num">₹${position.target_premium.toFixed(2)}</td>
         <td class="num">₹${position.stop_premium.toFixed(2)}</td>
-        <td class="num ${net > 0 ? 'pos' : net < 0 ? 'neg' : ''}">
+        <td class="num ${pnlClass(net)}" data-field="net">
           ${rupees(net, { sign: true })}</td>
-        <td class="num ${position.pnl_pct > 0 ? 'pos' : position.pnl_pct < 0 ? 'neg' : ''}">
+        <td class="num ${pnlClass(position.pnl_pct)}" data-field="pnlpct">
           ${percent(position.pnl_pct)}</td>
-        <td><span class="tag ${statusTag}">${icon} ${escapeHtml(
+        <td data-field="status"><span class="tag ${statusTag}">${icon} ${escapeHtml(
           position.status.replace('_', ' '))}</span></td>
-        <td style="color:var(--text-primary);font-weight:600">
+        <td data-field="action" style="color:var(--text-primary);font-weight:600">
           ${escapeHtml(position.action)}</td>
         <td><button class="btn btn--danger close-position"
                     data-id="${escapeHtml(position.position_id)}"
@@ -1694,7 +1784,7 @@ function connect() {
       return;
     }
     if (payload.type === 'snapshot') applySnapshot(payload);
-    else if (payload.type === 'ticks') applyTicks(payload.prices);
+    else if (payload.type === 'ticks') applyTicks(payload);
     else if (payload.type === 'ack' && payload.message) {
       showToast({ kind: 'SIGNAL_NEW', severity: 'good', title: payload.title
         || 'Done', message: payload.message, ts: new Date().toISOString() });
@@ -1741,8 +1831,25 @@ function syncControls(settings) {
  *  frozen, which is what "the graph is slow" actually meant -- the canvas
  *  redraw itself measures 0.5 ms.
  */
-function applyTicks(prices) {
-  if (!prices || !state.snapshot) return;
+function applyTicks(payload) {
+  if (!state.snapshot) return;
+  const prices = payload.prices || {};
+
+  // Open positions ride this same clock. Their P&L, status and alarms are
+  // computed by the engine, not here -- a second copy of that arithmetic in
+  // the browser would drift from the one the ledger records.
+  if (Array.isArray(payload.positions)) {
+    state.snapshot.positions = payload.positions;
+    state.snapshot.tick_priced = payload.priced;
+    updatePositionsLive(payload.positions);
+  }
+  (payload.events || []).forEach((event) => {
+    const key = `${event.kind}:${event.subject}:${event.ts}`;
+    if (state.seenEvents.has(key)) return;
+    state.seenEvents.add(key);
+    showToast(event);
+  });
+
   let touched = false;
 
   for (const signal of state.snapshot.signals || []) {
