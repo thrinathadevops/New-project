@@ -228,4 +228,23 @@ def build_candidates(
     # Affordable first, then by score: an unaffordable contract is information,
     # not an option, so it should never head the list.
     out.sort(key=lambda c: (c.affordable, c.score), reverse=True)
-    return [c.as_dict() for c in out[:limit]]
+
+    # Guarantee both sides are represented. Pure ranking fills every slot with
+    # the aligned side, so a CALL read would hide the PUT chain entirely -- and
+    # seeing both is the point of a shortlist. Each side gets at least a third
+    # of the slots, with the remainder going to whatever ranks highest.
+    per_side_floor = max(1, limit // 3)
+    calls = [c for c in out if c.option_type == "CE"]
+    puts = [c for c in out if c.option_type == "PE"]
+
+    picked: list[Candidate] = []
+    picked.extend(calls[:per_side_floor])
+    picked.extend(puts[:per_side_floor])
+    for candidate in out:
+        if len(picked) >= limit:
+            break
+        if candidate not in picked:
+            picked.append(candidate)
+
+    picked.sort(key=lambda c: (c.affordable, c.score), reverse=True)
+    return [c.as_dict() for c in picked[:limit]]
