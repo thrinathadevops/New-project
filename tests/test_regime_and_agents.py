@@ -437,9 +437,37 @@ def test_openrouter_preset_is_configured_for_free_use():
     assert preset["base_url"] == "https://openrouter.ai/api/v1"
     # OpenRouter asks callers to identify themselves.
     assert "HTTP-Referer" in preset["headers"]
-    # The default is the auto-router, which survives model retirement.
-    assert preset["model"] == "openrouter/free"
-    assert MODEL_PREFERENCES["openrouter"][0] == "openrouter/free"
+
+    # The default is a NAMED model, not the "openrouter/free" auto-router.
+    # The router chooses per request and was observed sending a
+    # structured-JSON task to a content-safety classifier, which replied
+    # "User Safety: safe". For output that must parse, a known general model
+    # beats a lucky dip -- the router stays as a fallback.
+    assert preset["model"] != "openrouter/free"
+    assert preset["model"].endswith(":free"), "the default must cost nothing"
+    assert "openrouter/free" in MODEL_PREFERENCES["openrouter"]
+
+
+def test_auto_order_puts_the_fast_providers_first():
+    """Ordered by measured latency, because this runs in a refresh loop:
+    groq ~1.8s, gemini ~2.2s, openrouter ~5-8s. OpenRouter's value is the
+    breadth of its fallback, which makes it a safety net rather than a first
+    choice."""
+    from intraday_advisor.agents.llm import AUTO_ORDER
+
+    assert AUTO_ORDER[0] == "groq"
+    assert AUTO_ORDER.index("openrouter") > AUTO_ORDER.index("gemini")
+
+
+def test_later_providers_in_the_chain_get_longer_timeouts():
+    """A flat timeout throws away the last resort: by the time the chain
+    reaches it, the fast options have already burned part of the budget."""
+    from intraday_advisor.agents.llm import ChainAgent
+
+    chain = ChainAgent(["groq", "gemini", "openrouter"], timeout=10.0)
+    assert chain.agents[0].timeout == 10.0
+    assert chain.agents[1].timeout > chain.agents[0].timeout
+    assert chain.agents[2].timeout > chain.agents[0].timeout
 
 
 def test_free_detection_trusts_pricing_over_the_name():

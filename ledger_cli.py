@@ -339,10 +339,23 @@ def cmd_doctor(args) -> int:
             regime_conviction=60, vix=14.0, vix_level="normal",
             market_open=True, data_is_live=True, graded_trades=0,
         )
-        verdict = LLMAgent(provider=status["provider"], timeout=40.0).review(probe)
+        # "auto" and comma-lists are chains, not a single provider -- building
+        # one LLMAgent from the literal string "auto" has no preset and no URL.
+        chain = status.get("chain") or [status["provider"]]
+        if len(chain) > 1:
+            from intraday_advisor.agents.llm import ChainAgent
+
+            reviewer = ChainAgent(chain, timeout=25.0)
+        else:
+            reviewer = LLMAgent(provider=chain[0], timeout=40.0)
+
+        verdict = reviewer.review(probe)
         state = "FAILED" if verdict.degraded else "working"
         print(f"    {state}: {verdict.model} responded in {verdict.latency_ms}ms "
               f"with {verdict.stance}")
+        for support in verdict.supports:
+            if "after" in support and "failed" in support:
+                print(f"    note: {support[:160]}")
         if verdict.error:
             print(f"    error: {verdict.error[:220]}")
     print("=" * 66)

@@ -92,6 +92,17 @@ which picks whatever is currently up. Churn stops being your problem.
 It also routes around per-model outages — the thing that made Gemini's bigger
 flash models unusable here (constant 503s on the free tier).
 
+**The default is a named model, not the auto-router.** `openrouter/free` picks
+a model per request, and was observed sending a structured-JSON task to a
+content-safety classifier, which replied `User Safety: safe`. For output that
+must parse, a known general model beats a lucky dip. The router stays in the
+preference list as a fallback.
+
+Measured against the live free tier: `gemma` models 429, `thinkingmachines`
+is 403 (restricted), and `nemotron-3.5-lightning` answered but took **92
+seconds** -- unusable in a refresh loop however free it is. The default is
+`nvidia/nemotron-3-super-120b-a12b:free`, which returns clean JSON in ~7s.
+
 **Free means free, verified from pricing, not naming.** Discovery filters the
 catalogue by the published `pricing` fields rather than trusting the `:free`
 suffix, and a model with *no* pricing block is treated as paid. Free-but-wrong
@@ -158,6 +169,23 @@ This is the recommended setting. It uses **every provider that has a key** and
 falls through on failure, so a rate limit on one does not drop the LLM layer.
 Free tiers rate-limit constantly -- that is what makes them free -- so pinning a
 single provider is a design flaw, not bad luck.
+
+Order is by **measured** round-trip latency, since this runs in a refresh loop:
+
+| Provider | Latency | Role |
+|---|---|---|
+| Groq | ~1.8s | primary |
+| Gemini | ~2.2s | fast second |
+| OpenRouter | ~5-8s | slowest, but the widest fallback |
+
+OpenRouter fronts many models and routes around individual provider outages,
+which makes it a better **safety net** than a first choice. An earlier version
+put it first on the assumption that breadth beat speed; measurement disagreed.
+
+Later providers in the chain get longer timeouts. By the time the chain reaches
+its last resort the fast options have already burned part of the budget --
+OpenRouter answered in 7s alone but 29s after two failures, and a flat 20s
+would have thrown the fallback away.
 
 Proven behaviour, with Groq's key deliberately broken:
 

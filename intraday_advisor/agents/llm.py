@@ -74,10 +74,13 @@ PRESETS = {
         "base_url": "https://openrouter.ai/api/v1",
         # ":free" models cost nothing. The exact ids churn, so this is only a
         # starting guess -- discover_model() confirms against live pricing.
-        # OpenRouter's auto-router across free models: it picks whichever is
-        # up, which is the right default when every hardcoded id in this
-        # file had already been retired within weeks of being written.
-        "model": "openrouter/free",
+        # A NAMED model, not the "openrouter/free" auto-router. The router
+        # works, but it chooses per request and was once observed routing a
+        # structured-JSON task to a content-safety classifier, which replied
+        # "User Safety: safe". For a task that must return parseable JSON,
+        # a known general model beats a lucky dip. The router stays in
+        # MODEL_PREFERENCES as a fallback.
+        "model": "nvidia/nemotron-3-super-120b-a12b:free",
         "needs_key": True,
         "note": "One key, many models, several genuinely free. Key from openrouter.ai/keys",
         # OpenRouter asks callers to identify themselves; it is also how your
@@ -143,12 +146,14 @@ def _suggested_model(error_body: str) -> str | None:
 MODEL_PREFERENCES = {
     # OpenRouter: free tiers only. Ordered by how well they follow a
     # "return only JSON" instruction, which is the whole job here.
+    # Measured against the live free tier: gemma 429s, inkling is 403
+    # (restricted), and nemotron-3.5-lightning answered but took 92 SECONDS --
+    # unusable inside a refresh loop however free it is.
     "openrouter": (
+        "nvidia/nemotron-3-super-120b-a12b:free",   # ~7.7s, reliable JSON
         "openrouter/free",                          # auto-router, survives churn
-        "google/gemma-4-31b-it:free",               # instruction-tuned
-        "nvidia/nemotron-3-super-120b-a12b:free",
-        "nvidia/nemotron-3.5-lightning:free",       # fast
-        "thinkingmachines/inkling:free",
+        "google/gemma-4-31b-it:free",               # instruction-tuned when free
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
     ),
     "groq": ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"),
     # flash-lite first on purpose: the larger flash models return 503
@@ -612,10 +617,19 @@ class LLMAgent:
         verdict.supports = [str(s)[:300] for s in (parsed.get("supports") or [])][:6]
         return verdict
 
-# Order to try providers in when none is named explicitly. Most resilient
-# first: OpenRouter fronts many models and routes around individual outages,
-# Groq is fastest, Gemini is a reliable third, Ollama needs no network at all.
-AUTO_ORDER = ("openrouter", "groq", "gemini", "ollama", "lmstudio")
+# Order to try providers in when none is named explicitly. Ordered by MEASURED
+# round-trip latency, because this runs inside a refresh loop:
+#
+#   groq        ~1.8s   fastest
+#   gemini      ~2.2s   fast and reliable (flash-lite)
+#   openrouter  ~5-8s   slowest, but the widest fallback -- it fronts many
+#                       models and routes around individual provider outages,
+#                       which makes it a better safety net than a first choice
+#   ollama      local, no network
+#
+# An earlier version put OpenRouter first on the assumption that breadth beat
+# speed. Measurement disagreed.
+AUTO_ORDER = ("groq", "gemini", "openrouter", "ollama", "lmstudio")
 
 
 def available_providers() -> list[str]:
@@ -666,7 +680,15 @@ class ChainAgent:
                  timeout: float = 20.0) -> None:
         names = providers if providers is not None else available_providers()
         self.providers = names
-        self.agents = [LLMAgent(provider=n, timeout=timeout) for n in names]
+        # Fail fast on the quick providers, but give the later ones room. By
+        # the time the chain reaches its last resort the fast options have
+        # already failed, so a tight timeout there just throws away the
+        # fallback -- OpenRouter answered in 7s alone and 29s after two
+        # failures, and a flat 20s would have cut it off.
+        self.agents = [
+            LLMAgent(provider=name, timeout=timeout * (1 if index == 0 else 2))
+            for index, name in enumerate(names)
+        ]
         self.name = "llm:" + ("+".join(names) if names else "none")
         self._last_good = 0
 
