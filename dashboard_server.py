@@ -135,6 +135,29 @@ class Broadcaster:
         """
         self._wake.set()
 
+    async def stream_ticks(self, every: float = 1.5) -> None:
+        """Push live index prices between snapshots.
+
+        A snapshot is ~105 KB and takes seconds to build; a tick payload is a
+        few dozen bytes. Sending them on the same cadence would mean either a
+        stale chart or a pointless amount of work, so they run on separate
+        clocks: heavy analysis occasionally, prices continuously.
+        """
+        from intraday_advisor import index_ticks
+
+        while True:
+            await asyncio.sleep(every)
+            if not clients:
+                continue
+            try:
+                prices = await asyncio.to_thread(
+                    index_ticks.latest, self.engine.indices
+                )
+            except Exception:  # noqa: BLE001 - a tick must never break the loop
+                continue
+            if prices:
+                await self.broadcast({"type": "ticks", "prices": prices})
+
     async def run(self) -> None:
         while True:
             try:
@@ -195,6 +218,8 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
             market=message.get("market"),
             expiries=message.get("expiries"),
             candidate_count=message.get("candidate_count"),
+            stock_universe=message.get("stock_universe"),
+            stock_limit=message.get("stock_limit"),
         )
         refresh = message.get("refresh_seconds")
         if refresh:
@@ -335,6 +360,8 @@ async def main_async(args) -> None:
         await handler(socket, broadcaster)
 
     async with serve(route, args.host, args.port, process_request=process_request):
+        # Prices stream on their own clock, independent of the snapshot loop.
+        tick_task = asyncio.create_task(broadcaster.stream_ticks())
         shown_host = "localhost" if args.host in ("0.0.0.0", "") else args.host
         logger.info("=" * 62)
         logger.info("  Options Desk ready:  http://%s:%s", shown_host, args.port)
@@ -343,7 +370,10 @@ async def main_async(args) -> None:
                     args.refresh, "OFF" if args.no_record else "ON")
         logger.info("  Grade after 15:30:   python ledger_cli.py grade")
         logger.info("=" * 62)
-        await broadcaster.run()
+        try:
+            await broadcaster.run()
+        finally:
+            tick_task.cancel()
 
 
 def main(argv=None) -> int:

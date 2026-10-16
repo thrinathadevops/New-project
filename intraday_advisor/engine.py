@@ -84,8 +84,9 @@ from intraday_advisor.market_calendar import (
     session_state,
 )
 from intraday_advisor.premarket import brief_notification, build_brief
-from intraday_advisor import live_ticks
+from intraday_advisor import index_ticks, live_ticks
 from intraday_advisor.candidates import build_candidates
+from intraday_advisor.stock_screener import scan_async
 
 logger = logging.getLogger("engine")
 
@@ -156,6 +157,9 @@ class Engine:
     expiries: dict = field(default_factory=dict)
     #: How many alternative contracts to offer per index.
     candidate_count: int = 8
+    #: Equity watchlist: nifty50 / fno / banknifty / all / off
+    stock_universe: str = "nifty50"
+    stock_limit: int = 30
     db_path: str | Path = DEFAULT_LEDGER_PATH
     indices: tuple[str, ...] = tuple(INDEX_CONFIG)
 
@@ -195,7 +199,8 @@ class Engine:
                 str(k).upper(): v for k, v in changes["expiries"].items() if v
             })
         for key in ("available_capital", "max_capital_fraction", "target_pct",
-                    "stop_pct", "record", "market", "candidate_count"):
+                    "stop_pct", "record", "market", "candidate_count",
+                    "stock_universe", "stock_limit"):
             if key in changes and changes[key] is not None:
                 setattr(self, key, changes[key])
 
@@ -352,6 +357,30 @@ class Engine:
                     f"Not recorded: {exc}"
                 ]
         return view
+
+    # ---------------------------------------------------------------- stocks
+    def _stocks(self) -> dict:
+        """The intraday equity watchlist, scanned off the request path.
+
+        A full scan is ~0.9s per symbol and pandas holds the GIL through most
+        of it, so 50 names take the better part of a minute. It therefore runs
+        on a worker thread and the last completed result is served at once --
+        a snapshot never waits for it.
+        """
+        if (self.stock_universe or "off").lower() in ("off", "none", ""):
+            return {"rows": [], "disabled": True,
+                    "note": "Equity watchlist is off."}
+        try:
+            return scan_async(
+                self.stock_universe,
+                capital=self.available_capital,
+                risk_pct=0.02,
+                interval=self.interval,
+                limit=self.stock_limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stock scan failed: %s", exc)
+            return {"rows": [], "error": str(exc)[:200]}
 
     # -------------------------------------------------------------- premarket
     def _premarket(self, market_session) -> dict:
@@ -596,6 +625,14 @@ class Engine:
 
         # Market-wide context, then the agent review that uses it. The agent
         # can only hold a trade back, never create or improve one.
+        # Subscribe the spot indices so the chart can track the market
+        # between snapshots. Yahoo candles run minutes behind; measured live,
+        # these ticks were 0.02-0.15s old.
+        try:
+            index_ticks.watch_indices(self.indices)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Index tick subscribe failed: %s", exc)
+
         regimes = {index: self._regime(index) for index in self.indices}
         for signal in signals:
             signal["regime"] = regimes.get(signal["index"], {})
@@ -707,6 +744,8 @@ class Engine:
             "market_session": market_session.as_dict(),
             "markets": list_markets(),
             "ticks": live_ticks.status(),
+            "index_ticks": index_ticks.latest(self.indices),
+            "stocks": self._stocks(),
             "premarket": premarket,
             # What YOU actually made, as distinct from whether the ENGINE has an
             # edge (that is the ledger block). The two can disagree, and the gap

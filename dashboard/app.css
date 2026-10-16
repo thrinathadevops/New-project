@@ -1183,3 +1183,23 @@ table.cands tr.cand--unaffordable { opacity: 0.45; }
 .cand__risk--SEVERE  { color: var(--critical); }
 
 .pill--ticks-on { background: var(--good); color: var(--on-good); }
+
+
+/* ================================================== stock watchlist ===== */
+
+table.data td.sym {
+  color: var(--text-primary); font-weight: 600;
+  font-variant-numeric: normal;
+}
+.sig-pill {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+  padding: 2px 7px; border-radius: 999px;
+}
+.sig-pill--BUY  { background: var(--good);     color: var(--on-good); }
+.sig-pill--SELL { background: var(--critical); color: var(--on-critical); }
+.sig-pill--HOLD { background: var(--surface-3); color: var(--text-secondary); }
+.scan-spinner {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent); margin-right: 6px;
+  animation: pulse-dot 1.2s var(--ease) infinite;
+}

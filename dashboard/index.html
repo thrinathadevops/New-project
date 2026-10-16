@@ -236,6 +236,42 @@
     </div>
   </section>
 
+  <!-- ========================================== stock watchlist ====== -->
+  <section class="card" style="margin-top:16px" aria-label="Intraday stock watchlist">
+    <div class="card__head">
+      <h2 class="card__title">Intraday stocks — ranked by confluence</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="tag tag--muted" id="stocks-meta"></span>
+        <select id="stock-universe" style="font-size:12.5px;padding:5px 9px;
+                background:var(--surface-3);color:var(--text-primary);
+                border:1px solid var(--border-strong);border-radius:8px">
+          <option value="nifty50">Nifty 50</option>
+          <option value="fno">F&amp;O actives</option>
+          <option value="banknifty">Bank stocks</option>
+          <option value="all">All</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+    </div>
+    <div class="table-scroll">
+      <table class="data" id="stocks-table">
+        <thead>
+          <tr>
+            <th>Symbol</th><th class="num">Price</th><th class="num">Chg%</th>
+            <th class="num">Score</th><th>Signal</th>
+            <th class="num">RSI</th><th class="num">ADX</th><th class="num">ATR%</th>
+            <th class="num">Vol×</th>
+            <th class="num">Entry</th><th class="num">Stop</th><th class="num">Target</th>
+            <th class="num">Shares</th><th class="num">Risk</th>
+            <th class="num">Net R:R</th><th class="num">Cost%</th>
+          </tr>
+        </thead>
+        <tbody id="stocks-body"></tbody>
+      </table>
+    </div>
+    <p class="field__hint" id="stocks-note" style="margin-top:10px"></p>
+  </section>
+
   <!-- ============================================ trade journal ======= -->
   <section class="card" style="margin-top:16px" aria-label="Trade journal">
     <div class="card__head">

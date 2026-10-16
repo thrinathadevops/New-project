@@ -111,6 +111,8 @@ class AngelTickStreamer:
         # closed"). Tokens are queued until _on_open flushes them.
         self._open = False
         self._pending: set[str] = set()
+        # Queued per exchange segment, because indices and options differ.
+        self._pending_segments: dict[int, set] = {}
         self._error: str | None = None
 
     # -- lifecycle -------------------------------------------------------- #
@@ -164,6 +166,11 @@ class AngelTickStreamer:
         self._pending.clear()
         if queued:
             self._send_subscribe(queued)
+        # Flush anything waiting on a non-default segment.
+        for exchange_type, tokens in list(self._pending_segments.items()):
+            if tokens:
+                self._send_subscribe(sorted(tokens), exchange_type=exchange_type)
+        self._pending_segments.clear()
 
     def _on_data(self, wsapp, message):
         if isinstance(message, dict):
@@ -191,12 +198,31 @@ class AngelTickStreamer:
             # Not open yet: queue and let _on_open send it.
             self._pending.update(new)
 
-    def _send_subscribe(self, tokens: list[str]) -> None:
+    def _send_subscribe(self, tokens: list[str],
+                        exchange_type: int = NFO_EXCHANGE_TYPE) -> None:
         try:
             self._ws.subscribe("posmon", SNAP_QUOTE_MODE,
-                               [{"exchangeType": NFO_EXCHANGE_TYPE, "tokens": [str(t) for t in tokens]}])
+                               [{"exchangeType": exchange_type,
+                                 "tokens": [str(t) for t in tokens]}])
         except Exception as exc:  # noqa: BLE001
             self._error = f"subscribe failed: {exc}"
+
+    def subscribe_segment(self, tokens: list[str], *, exchange_type: int) -> None:
+        """Subscribe on a specific exchange segment.
+
+        Spot indices sit on the NSE segment (1) while options are on NFO (2),
+        so they cannot share a subscribe call -- the wrong segment silently
+        returns no ticks.
+        """
+        tokens = [str(t) for t in tokens if t]
+        new = [t for t in tokens if t not in self._subscribed]
+        self._subscribed.update(tokens)
+        if not new:
+            return
+        if self._ws and self._open:
+            self._send_subscribe(new, exchange_type=exchange_type)
+        else:
+            self._pending_segments.setdefault(exchange_type, set()).update(new)
 
     # -- reads ------------------------------------------------------------ #
     def get_ltp(self, token: str) -> float | None:

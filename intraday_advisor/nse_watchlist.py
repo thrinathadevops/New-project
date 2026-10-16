@@ -16,7 +16,7 @@ NIFTY50 = [
     "GRASIM", "CIPLA", "DIVISLAB", "DRREDDY", "HINDALCO",
     "ADANIENT", "ADANIPORTS", "BAJAJ-AUTO", "BAJAJFINSV", "BRITANNIA",
     "EICHERMOT", "HEROMOTOCO", "M&M", "SHREECEM", "TATACONSUM",
-    "TATAMOTORS", "UPL", "VEDL", "APOLLOHOSP", "SBILIFE",
+    "TMPV", "UPL", "VEDL", "APOLLOHOSP", "SBILIFE",
 ]
 
 # Nifty Bank (high volume options)
@@ -25,9 +25,15 @@ NIFTY_BANK = [
     "INDUSINDBK", "BANDHANBNK", "FEDERALBNK", "IDFCFIRSTB", "PNB",
 ]
 
+# NOTE: "TATAMOTORS" is gone -- the company demerged and the old Yahoo ticker
+# returns no data ("possibly delisted"). Replaced with TMPV (Tata Motors
+# Passenger Vehicles), verified to resolve. A dead ticker returns zero bars,
+# scores as HOLD and quietly vanishes from the ranking rather than announcing
+# itself, so the screener reports unresolved symbols in `failures`.
+
 # High-volume F&O stocks with active options chains
 FNO_ACTIVES = [
-    "TATAMOTORS", "INFY", "RELIANCE", "SBIN", "ICICIBANK",
+    "INFY", "RELIANCE", "SBIN", "ICICIBANK",
     "HDFCBANK", "AXISBANK", "WIPRO", "TCS", "BAJFINANCE",
     "HINDUNILVR", "ITC", "SUNPHARMA", "ONGC", "TATASTEEL",
     "JSWSTEEL", "LT", "TECHM", "HCLTECH", "MARUTI",

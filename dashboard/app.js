@@ -285,7 +285,9 @@ function signalCard(signal, changed) {
         <span class="badge-dir badge-dir--${direction}">${direction}</span>
         <div>
           <div class="sig-name">${escapeHtml(signal.index)}</div>
-          <div class="sig-sub">${escapeHtml(contract)} · spot ${(signal.spot || 0).toFixed(0)}</div>
+          <div class="sig-sub">${escapeHtml(contract)} · spot
+            <span data-spot-for="${escapeHtml(signal.index)}">${
+              (signal.spot || 0).toFixed(2)}</span></div>
         </div>
       </div>
 
@@ -346,6 +348,77 @@ function signalCard(signal, changed) {
 
 
 
+
+
+// -------------------------------------------------------- stock watchlist ---
+
+function renderStocks(snapshot) {
+  const data = snapshot.stocks || {};
+  const rows = data.rows || [];
+  const body = $('stocks-body');
+  const meta = $('stocks-meta');
+  if (!body) return;
+
+  const select = $('stock-universe');
+  if (select && data.mode && select.value !== data.mode && !select.dataset.touched) {
+    select.value = data.mode;
+  }
+
+  if (data.disabled) {
+    body.innerHTML = '';
+    setText(meta, 'off');
+    setText($('stocks-note'), data.note || '');
+    return;
+  }
+
+  setText(meta, data.scanning
+    ? 'scanning…'
+    : `${rows.length} of ${data.scored || 0} · ${data.age_seconds ?? 0}s ago`);
+
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="16" class="empty">${
+      data.scanning ? '<span class="scan-spinner"></span>' : ''
+    }${escapeHtml(data.note || data.error || 'Nothing scanned yet.')}</td></tr>`;
+    setText($('stocks-note'), '');
+    return;
+  }
+
+  body.innerHTML = rows.map((r) => {
+    // Net R:R below 1 means you risk more than you stand to make. At small
+    // capital this is common for high-priced shares, because the position is
+    // capped by cash while costs are not.
+    const poor = r.net_rr > 0 && r.net_rr < 1;
+    return `
+      <tr title="${escapeHtml((r.warnings || []).join(' · '))}">
+        <td class="sym">${escapeHtml(r.symbol)}</td>
+        <td class="num">₹${r.price.toFixed(2)}</td>
+        <td class="num ${r.change_pct > 0 ? 'pos' : r.change_pct < 0 ? 'neg' : ''}">
+          ${r.change_pct > 0 ? '+' : ''}${r.change_pct.toFixed(2)}%</td>
+        <td class="num"><b>${r.score}</b></td>
+        <td><span class="sig-pill sig-pill--${escapeHtml(r.signal)}">${escapeHtml(r.signal)}</span></td>
+        <td class="num">${r.rsi ?? '—'}</td>
+        <td class="num">${r.adx ?? '—'}</td>
+        <td class="num">${r.atr_pct ?? '—'}</td>
+        <td class="num">${r.volume_ratio ?? '—'}</td>
+        <td class="num">₹${r.entry.toFixed(2)}</td>
+        <td class="num neg">₹${r.stop.toFixed(2)}</td>
+        <td class="num pos">₹${r.target.toFixed(2)}</td>
+        <td class="num">${r.shares || '—'}</td>
+        <td class="num">${r.shares ? `${rupees(r.risk_amount)} (${percent(r.risk_pct)})` : '—'}</td>
+        <td class="num ${poor ? 'neg' : ''}">${r.net_rr.toFixed(2)}</td>
+        <td class="num">${percent(r.cost_pct, 2)}</td>
+      </tr>`;
+  }).join('');
+
+  const poorCount = rows.filter((r) => r.net_rr > 0 && r.net_rr < 1).length;
+  setText($('stocks-note'),
+    `${data.note || ''}`
+    + (poorCount
+      ? ` ${poorCount} of ${rows.length} show net reward:risk below 1 — at this `
+        + `capital the position is capped by cash while costs are not, so you `
+        + `would risk more than you stand to make.`
+      : ''));
+}
 
 // ------------------------------------------------------------ candidates ---
 
@@ -1621,6 +1694,7 @@ function connect() {
       return;
     }
     if (payload.type === 'snapshot') applySnapshot(payload);
+    else if (payload.type === 'ticks') applyTicks(payload.prices);
     else if (payload.type === 'ack' && payload.message) {
       showToast({ kind: 'SIGNAL_NEW', severity: 'good', title: payload.title
         || 'Done', message: payload.message, ts: new Date().toISOString() });
@@ -1660,6 +1734,60 @@ function syncControls(settings) {
   setText($('deploy-hint'), `one stop ≈ ${(implied * 100).toFixed(1)}% of capital`);
 }
 
+/** Move the chart to the live price between snapshots.
+ *
+ *  The chart is built from candles that run minutes behind the market, and a
+ *  snapshot only lands every 10-20 seconds. Without this the graph looks
+ *  frozen, which is what "the graph is slow" actually meant -- the canvas
+ *  redraw itself measures 0.5 ms.
+ */
+function applyTicks(prices) {
+  if (!prices || !state.snapshot) return;
+  let touched = false;
+
+  for (const signal of state.snapshot.signals || []) {
+    const tick = prices[signal.index];
+    if (!tick || !tick.price) continue;
+    signal.spot = tick.price;
+    signal.spot_is_tick = true;
+
+    const forming = signal.chart && signal.chart.forming;
+    if (forming) {
+      // Extend the forming bar the way the exchange would: close moves,
+      // high and low ratchet outward, open never changes.
+      forming.close = tick.price;
+      forming.high = Math.max(forming.high, tick.price);
+      forming.low = Math.min(forming.low, tick.price);
+    }
+    if (signal.index === state.selectedIndex) touched = true;
+  }
+
+  if (touched) {
+    const signal = state.snapshot.signals.find(
+      (s) => s.index === state.selectedIndex);
+    if (signal) {
+      chart.forming = (signal.chart && signal.chart.forming) || null;
+      chart.formingTarget = chart.forming ? chart.forming.close : null;
+      if (chart.forming && chart.formingClose === null) {
+        chart.formingClose = chart.forming.open;
+      }
+    }
+  }
+  renderLiveSpots(prices);
+}
+
+/** Update the spot figure on each card without re-rendering the card. */
+function renderLiveSpots(prices) {
+  document.querySelectorAll('[data-spot-for]').forEach((node) => {
+    const tick = prices[node.dataset.spotFor];
+    if (tick && tick.price) {
+      setText(node, tick.price.toLocaleString('en-IN', {
+        minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+      node.title = `live tick, ${tick.age}s old`;
+    }
+  });
+}
+
 function applySnapshot(snapshot) {
   state.snapshot = snapshot;
   syncControls(snapshot.settings);
@@ -1674,6 +1802,7 @@ function applySnapshot(snapshot) {
   renderPremarket(snapshot);
   renderRegime(snapshot);
   renderEdge(snapshot);
+  renderStocks(snapshot);
   renderJournal(snapshot);
   renderGlossary(snapshot);
   renderChartChrome(snapshot);
@@ -1733,6 +1862,12 @@ function wireControls() {
     $('chart-table').hidden = !state.tableView;
     $('view-toggle').textContent = state.tableView ? 'Chart view' : 'Table view';
     if (!state.tableView) { sizeCanvas(); drawChart(); }
+  });
+
+  $('stock-universe').addEventListener('change', () => {
+    const select = $('stock-universe');
+    select.dataset.touched = '1';
+    send({ type: 'settings', stock_universe: select.value });
   });
 
   $('premarket-toggle').addEventListener('click', () => {
