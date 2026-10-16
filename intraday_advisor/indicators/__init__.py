@@ -72,8 +72,29 @@ def vwap(df: pd.DataFrame) -> pd.Series:
     cumulative_volume = df["Volume"].cumsum()
     return (typical_price * df["Volume"]).cumsum() / cumulative_volume.replace(0, np.nan)
 
+# Bump when the indicator set changes, so a frame enriched by an older version
+# is recomputed rather than trusted.
+_INDICATOR_SET_VERSION = 2
+
+
+def _fingerprint(df: pd.DataFrame) -> tuple:
+    """Identify a frame cheaply: row count, last timestamp, indicator version."""
+    last = str(df.index[-1]) if len(df) else ""
+    return (len(df), last, _INDICATOR_SET_VERSION)
+
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates Base Indicators + New Custom 126-Engine Indicators"""
+    """Calculate the full indicator set (39 engines, ~242 columns).
+
+    Short-circuits when handed a frame this function already enriched and that
+    has not changed since. The engine builds a chart from the same frame the
+    analyser scores, so without this the whole set is computed twice per index
+    per refresh -- 0.6s of pure waste each time, which at a 10-second refresh
+    is most of a second gone for nothing.
+    """
+    if df.attrs.get("_indicators_stamp") == _fingerprint(df):
+        return df
+
     enriched = df.copy()
     
     # 1. Base Core calculations needed by advanced indicators
@@ -105,5 +126,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     
     # 2. Run the dynamic registry indicators
     enriched = registry.apply_all(enriched)
-    
+
+    # Stamp AFTER the registry, which may hand back a new frame.
+    enriched.attrs["_indicators_stamp"] = _fingerprint(enriched)
     return enriched

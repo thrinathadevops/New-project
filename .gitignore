@@ -8,6 +8,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_temp/
 .streamlit/secrets.toml
 data/*.sqlite
 data/*.db

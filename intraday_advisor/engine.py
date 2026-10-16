@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time as dtime, timedelta, timezone
@@ -149,6 +150,7 @@ class Engine:
     _chart_fetched_at: dict = field(default_factory=dict, repr=False)
     _regime_cache: dict = field(default_factory=dict, repr=False)
     _agent_cache: dict = field(default_factory=dict, repr=False)
+    _regime_refreshing: bool = field(default=False, repr=False)
     _regime_fetched_at: float = field(default=0.0, repr=False)
     _agents: Any = field(default=None, repr=False)
     _costs: Any = None
@@ -307,12 +309,52 @@ class Engine:
 
     # ------------------------------------------------------------------ regime
     def _regime(self, index: str) -> dict:
-        """Market-wide context, cached: slow to build, slow to change."""
+        """Market-wide context: cached, and refreshed WITHOUT blocking.
+
+        Building it costs ~20 seconds of network (four timeframes, VIX, four
+        global indices, a breadth basket). Rebuilding it inline would stall one
+        snapshot in every five minutes for 20 seconds -- during market hours
+        that is a visible freeze exactly when the screen matters. So a stale
+        regime is served immediately while a daemon thread refreshes it.
+
+        Stale market context is a far smaller problem than a frozen dashboard:
+        it moves slowly by construction, which is why it is cached at all.
+        """
         now = time.time()
-        if self._regime_cache and (now - self._regime_fetched_at) < self.regime_ttl:
-            cached = self._regime_cache.get(index)
-            if cached:
-                return cached
+        cached = self._regime_cache.get(index)
+        fresh = (now - self._regime_fetched_at) < self.regime_ttl
+
+        if cached and fresh:
+            return cached
+        if cached and not fresh:
+            self._refresh_regime_async()
+            stale = dict(cached)
+            stale["stale"] = True
+            return stale
+        # Nothing cached at all: this first build has to block.
+        return self._build_regime(index)
+
+    def _refresh_regime_async(self) -> None:
+        """Rebuild every index's regime on a daemon thread, at most one at a time."""
+        if self._regime_refreshing:
+            return
+        self._regime_refreshing = True
+
+        def worker() -> None:
+            try:
+                for index in self.indices:
+                    self._regime_cache[index] = self._build_regime(index, store=False)
+                self._regime_fetched_at = time.time()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Background regime refresh failed: %s", exc)
+            finally:
+                self._regime_refreshing = False
+
+        threading.Thread(target=worker, daemon=True,
+                         name="regime-refresh").start()
+
+    def _build_regime(self, index: str, *, store: bool = True) -> dict:
+        """The blocking build. Never raises."""
         try:
             from intraday_advisor.regime import analyse_market
             result = analyse_market(index, with_breadth=self.with_breadth).as_dict()
@@ -325,8 +367,9 @@ class Engine:
                 "global_cues": {}, "reasons": [], "invalidation": [],
                 "warnings": [f"Market context unavailable: {exc}"],
             }
-        self._regime_cache[index] = result
-        self._regime_fetched_at = now
+        if store:
+            self._regime_cache[index] = result
+            self._regime_fetched_at = time.time()
         return result
 
     # --------------------------------------------------------------- positions
