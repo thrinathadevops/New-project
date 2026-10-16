@@ -36,7 +36,13 @@ from intraday_advisor.agents.base import (
     brief_from_snapshot,
     combine,
 )
-from intraday_advisor.agents.llm import PRESETS, LLMAgent
+from intraday_advisor.agents.llm import (
+    AUTO_ORDER,
+    PRESETS,
+    ChainAgent,
+    LLMAgent,
+    available_providers,
+)
 from intraday_advisor.agents.rules import RuleAgent
 from intraday_advisor.envfile import load_env
 
@@ -44,7 +50,7 @@ __all__ = [
     "PROCEED", "CAUTION", "VETO", "PRESETS",
     "Agent", "AgentVerdict", "TradeBrief", "LLMAgent", "RuleAgent",
     "brief_from_snapshot", "combine", "build_agents", "review_signal",
-    "agent_status",
+    "agent_status", "ChainAgent", "available_providers", "AUTO_ORDER",
 ]
 
 
@@ -71,6 +77,18 @@ def build_agents(
     agents: list[Agent] = [RuleAgent()]
     if choice in ("rules", "", "checklist"):
         return agents
+
+    # "auto" (the recommended setting) uses every provider that has a key and
+    # falls through on failure. A comma-separated list sets an explicit order.
+    # A single name still works but makes that provider a single point of
+    # failure, and free tiers rate-limit constantly.
+    if choice in ("auto", "all", "chain"):
+        return agents + [ChainAgent(timeout=20.0)]
+
+    names = [n.strip() for n in choice.split(",") if n.strip()]
+    if len(names) > 1:
+        return agents + [ChainAgent(names, timeout=20.0)]
+    choice = names[0] if names else choice
 
     agents.append(LLMAgent(
         provider=choice,
@@ -145,17 +163,41 @@ def agent_status(provider: str | None = None) -> dict:
         )
         return status
 
+    if choice in ("auto", "all", "chain") or "," in choice:
+        names = ([n.strip() for n in choice.split(",") if n.strip()]
+                 if "," in choice else available_providers())
+        chain = ChainAgent(names)
+        ready, why = chain.available()
+        status.update({
+            "llm_active": True, "llm_ready": ready, "chain": names,
+            "model": ", ".join(a.model for a in chain.agents) or None,
+            "detail": (
+                f"Rule checklist + {len(names)} provider(s) with fallback: "
+                f"{' -> '.join(names)}." if ready
+                else f"Rule checklist only — {why}"
+            ),
+        })
+        return status
+
     agent = LLMAgent(
         provider=choice,
         model=os.getenv("AGENT_MODEL"),
         base_url=os.getenv("AGENT_BASE_URL"),
     )
     ready, why = agent.available()
+    others = [p for p in available_providers() if p != choice]
     status.update({
         "llm_active": True, "llm_ready": ready, "model": agent.model,
+        "chain": [choice],
         "detail": (
             f"Rule checklist + {choice} ({agent.model})." if ready
             else f"Rule checklist only — {why}"
+        ),
+        "advice": (
+            f"Only {choice} reviews trades, so a rate limit there drops the "
+            f"LLM layer entirely. AGENT_PROVIDER=auto would fall back across "
+            f"{', '.join([choice] + others)}."
+            if others else ""
         ),
     })
     return status

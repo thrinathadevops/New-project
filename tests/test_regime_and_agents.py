@@ -509,3 +509,150 @@ def test_discovery_excludes_paid_models_on_openrouter(monkeypatch):
 
     monkeypatch.setitem(__import__("sys").modules, "requests", FakeRequests)
     assert llm_module.discover_model("http://x", "", "openrouter") is None
+
+
+# --------------------------------------------------- provider fallback ----
+
+def test_available_providers_requires_a_key_or_a_live_endpoint(monkeypatch):
+    """A keyless local provider passes the key check trivially; claiming it is
+    available with nothing listening makes the status panel lie."""
+    import intraday_advisor.agents.llm as llm_module
+
+    monkeypatch.setattr(llm_module, "_reachable", lambda *a, **k: False)
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_API_KEY", raising=False)
+
+    found = llm_module.available_providers()
+    assert "groq" in found
+    assert "ollama" not in found, "unreachable local provider must not be listed"
+
+
+def test_chain_falls_through_to_the_next_provider():
+    """One provider failing must not drop the whole LLM layer. Free tiers
+    rate-limit constantly, so depending on exactly one is a design flaw."""
+    from intraday_advisor.agents.llm import ChainAgent
+
+    chain = ChainAgent([], timeout=1.0)
+
+    class Dead:
+        provider = "dead"
+        name = "llm:dead"
+
+        def review(self, brief):
+            verdict = AgentVerdict(provider="dead", stance=CAUTION, degraded=True)
+            verdict.error = "boom"
+            return verdict
+
+    class Alive:
+        provider = "alive"
+        name = "llm:alive"
+
+        def review(self, brief):
+            return AgentVerdict(provider="alive", stance=VETO, summary="no",
+                                confidence=80)
+
+    chain.agents = [Dead(), Alive()]
+    verdict = chain.review(a_brief())
+
+    assert verdict.stance == VETO
+    assert verdict.degraded is False
+    assert any("after 1 failed" in s for s in verdict.supports)
+
+
+def test_chain_remembers_which_provider_last_worked():
+    """A dead provider should not be re-probed at the front of the queue on
+    every single call."""
+    from intraday_advisor.agents.llm import ChainAgent
+
+    calls = []
+
+    class Recorder:
+        def __init__(self, name, ok):
+            self.provider = name
+            self.name = f"llm:{name}"
+            self.ok = ok
+
+        def review(self, brief):
+            calls.append(self.provider)
+            if self.ok:
+                return AgentVerdict(provider=self.provider, stance=PROCEED)
+            verdict = AgentVerdict(provider=self.provider, stance=CAUTION,
+                                   degraded=True)
+            verdict.error = "down"
+            return verdict
+
+    chain = ChainAgent([], timeout=1.0)
+    chain.agents = [Recorder("dead", False), Recorder("alive", True)]
+
+    chain.review(a_brief())
+    assert calls == ["dead", "alive"]
+
+    calls.clear()
+    chain.review(a_brief())
+    assert calls == ["alive"], "the known-good provider should be tried first"
+
+
+def test_chain_with_every_provider_down_is_caution_not_proceed():
+    from intraday_advisor.agents.llm import ChainAgent
+
+    chain = ChainAgent([], timeout=1.0)
+
+    class Dead:
+        provider = "dead"
+        name = "llm:dead"
+
+        def review(self, brief):
+            verdict = AgentVerdict(provider="dead", stance=CAUTION, degraded=True)
+            verdict.error = "down"
+            return verdict
+
+    chain.agents = [Dead(), Dead()]
+    verdict = chain.review(a_brief())
+
+    assert verdict.stance == CAUTION
+    assert verdict.degraded is True
+    assert "failed" in verdict.summary
+
+
+def test_chain_with_no_providers_says_so():
+    from intraday_advisor.agents.llm import ChainAgent
+
+    chain = ChainAgent([], timeout=1.0)
+    ready, why = chain.available()
+    assert ready is False
+    assert "OPENROUTER_API_KEY" in why
+
+    verdict = chain.review(a_brief())
+    assert verdict.stance == CAUTION
+    assert verdict.degraded is True
+
+
+def test_auto_builds_a_chain_and_keeps_the_rules(monkeypatch):
+    # ChainAgent resolves providers through the llm module, so patch it there.
+    monkeypatch.setattr("intraday_advisor.agents.llm.available_providers",
+                        lambda: ["groq", "gemini"])
+    agents = build_agents("auto")
+
+    assert agents[0].name == "rules"
+    assert len(agents) == 2
+    assert "groq" in agents[1].name and "gemini" in agents[1].name
+
+
+def test_explicit_comma_separated_order_is_honoured():
+    agents = build_agents("gemini,groq")
+    assert agents[0].name == "rules"
+    assert agents[1].providers == ["gemini", "groq"]
+
+
+def test_single_provider_status_warns_about_the_single_point_of_failure(monkeypatch):
+    # Patched where it is USED, not where it is defined: agents/__init__ binds
+    # the name at import, so patching the llm module leaves that binding alone.
+    monkeypatch.setattr("intraday_advisor.agents.available_providers",
+                        lambda: ["groq", "gemini"])
+    from intraday_advisor.agents import agent_status
+
+    status = agent_status("groq")
+    assert "auto" in (status.get("advice") or "")
+    assert "gemini" in status["advice"]

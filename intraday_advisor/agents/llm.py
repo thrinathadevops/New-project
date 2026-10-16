@@ -611,3 +611,114 @@ class LLMAgent:
         verdict.concerns = [str(c)[:300] for c in (parsed.get("concerns") or [])][:6]
         verdict.supports = [str(s)[:300] for s in (parsed.get("supports") or [])][:6]
         return verdict
+
+# Order to try providers in when none is named explicitly. Most resilient
+# first: OpenRouter fronts many models and routes around individual outages,
+# Groq is fastest, Gemini is a reliable third, Ollama needs no network at all.
+AUTO_ORDER = ("openrouter", "groq", "gemini", "ollama", "lmstudio")
+
+
+def available_providers() -> list[str]:
+    """Providers that could actually run right now, in preference order."""
+    from intraday_advisor.envfile import load_env
+
+    load_env()
+    ready = []
+    for name in AUTO_ORDER:
+        agent = LLMAgent(provider=name)
+        ok, _ = agent.available()
+        if not ok:
+            continue
+        # A keyless local provider passes the key check trivially, so it would
+        # be reported "ready" with nothing listening. Probe it, briefly --
+        # claiming a provider is available when it is not makes the status
+        # panel lie and wastes a round trip on every review.
+        if not agent.needs_key and not _reachable(agent.base_url):
+            continue
+        ready.append(name)
+    return ready
+
+
+def _reachable(base_url: str, timeout: float = 1.0) -> bool:
+    """Is a local endpoint actually listening? Fast, best-effort."""
+    try:
+        import requests
+
+        requests.get(f"{base_url}/models", timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class ChainAgent:
+    """Tries several providers in turn, so no single one is a dependency.
+
+    Why this exists: with one provider configured, a rate limit or an outage
+    mid-session silently drops the whole LLM layer to CAUTION. Free tiers
+    rate-limit constantly -- that is what makes them free -- so depending on
+    exactly one is a design flaw rather than bad luck.
+
+    The provider that last answered is tried first next time, so a dead one is
+    not re-probed at the front of the queue on every call.
+    """
+
+    def __init__(self, providers: list[str] | None = None, *,
+                 timeout: float = 20.0) -> None:
+        names = providers if providers is not None else available_providers()
+        self.providers = names
+        self.agents = [LLMAgent(provider=n, timeout=timeout) for n in names]
+        self.name = "llm:" + ("+".join(names) if names else "none")
+        self._last_good = 0
+
+    def available(self) -> tuple[bool, str]:
+        if not self.agents:
+            return False, (
+                "No LLM provider is configured. Set OPENROUTER_API_KEY, "
+                "GROQ_API_KEY or GEMINI_API_KEY in .env, or run Ollama locally."
+            )
+        return True, ""
+
+    def _ordered(self):
+        """Last known-good provider first, then the rest in preference order."""
+        if not self.agents:
+            return []
+        index = self._last_good % len(self.agents)
+        return [(index, self.agents[index])] + [
+            (i, a) for i, a in enumerate(self.agents) if i != index
+        ]
+
+    @timed
+    def review(self, brief: TradeBrief) -> AgentVerdict:
+        ok, why = self.available()
+        if not ok:
+            verdict = AgentVerdict(provider=self.name, stance=CAUTION, degraded=True)
+            verdict.error = why
+            verdict.summary = f"No LLM available: {why}"
+            verdict.concerns = [
+                "Only the rule checklist ran; no model reviewed this trade."
+            ]
+            return verdict
+
+        failures = []
+        for index, agent in self._ordered():
+            verdict = agent.review(brief)
+            if not verdict.degraded:
+                self._last_good = index
+                if failures:
+                    # Recorded, so a quietly-failing provider gets noticed.
+                    verdict.supports.append(
+                        f"Answered by {agent.provider} after "
+                        f"{len(failures)} failed: {'; '.join(failures)}"
+                    )
+                return verdict
+            failures.append(f"{agent.provider} ({(verdict.error or 'failed')[:60]})")
+
+        combined = AgentVerdict(provider=self.name, stance=CAUTION, degraded=True)
+        combined.error = "; ".join(failures)
+        combined.summary = f"All {len(self.agents)} LLM provider(s) failed."
+        combined.concerns = [
+            f"No model reviewed this trade - {len(failures)} provider(s) "
+            f"unreachable. The rule checklist still applied."
+        ]
+        return combined
+

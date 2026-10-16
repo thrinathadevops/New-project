@@ -148,10 +148,42 @@ refresh would make 12 calls a minute, burn a free tier within the hour, add
 latency to every snapshot, and keep re-asking a question whose inputs had not
 moved. A 5-minute candle means roughly 2 calls per 5 minutes.
 
+### Do not depend on one provider
+
+```ini
+AGENT_PROVIDER=auto
+```
+
+This is the recommended setting. It uses **every provider that has a key** and
+falls through on failure, so a rate limit on one does not drop the LLM layer.
+Free tiers rate-limit constantly -- that is what makes them free -- so pinning a
+single provider is a design flaw, not bad luck.
+
+Proven behaviour, with Groq's key deliberately broken:
+
+```
+1. normal           -> groq answered in 1.8s
+2. groq 401         -> fell through to gemini, verdict returned, and recorded
+                       "Answered by gemini after 1 failed: groq (HTTP 401)"
+3. all unreachable  -> CAUTION, degraded=true, never a silent PROCEED
+```
+
+The provider that last answered is tried first next time, so a dead one is not
+re-probed at the head of the queue on every call. An explicit order also works:
+
+```ini
+AGENT_PROVIDER=openrouter,groq,gemini
+```
+
+Keyless local providers (Ollama, LM Studio) are **probed** rather than assumed:
+they pass a key check trivially, and reporting one as available with nothing
+listening makes the status panel lie.
+
 ### Configuration
 
 ```bash
-AGENT_PROVIDER=rules      # default: checklist only
+AGENT_PROVIDER=auto       # recommended: all keyed providers, with fallback
+AGENT_PROVIDER=rules      # checklist only
 AGENT_PROVIDER=ollama     # checklist + free local LLM
 AGENT_PROVIDER=groq       # checklist + free-tier hosted
 AGENT_PROVIDER=none       # off
