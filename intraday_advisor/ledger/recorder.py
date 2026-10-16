@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from intraday_advisor.scoring import SCORED_FEATURES
 from intraday_advisor.ledger.schema import (
     DEFAULT_LEDGER_PATH,
     ENGINE_VERSION,
@@ -43,14 +44,18 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 # Features worth persisting from the analysis row. Kept explicit rather than
 # dumping everything, so the stored vector stays stable enough to calibrate on.
-FEATURE_KEYS = (
-    "Bullish_OB", "Bearish_OB",
-    "Bullish_FVG", "Bearish_FVG",
-    "Liquidity_Sweep_Bullish", "Liquidity_Sweep_Bearish",
-    "SuperTrend_Dir", "Adaptive_MACD_Hist",
-    "RSI14", "ATR14", "VWAP", "EMA9", "EMA21", "EMA200",
-    "Close", "Volume", "ADTV20",
+# Context columns worth storing that the scorer does not read directly, but
+# which any later analysis will want (price level, volatility, liquidity).
+_CONTEXT_KEYS = (
+    "Close", "Open", "High", "Low", "Volume", "ADTV20",
+    "EMA9", "EMA21", "EMA200", "VWAP", "ATR14", "RSI14",
 )
+
+#: Everything recorded on each signal: exactly what the scorer scored, plus
+#: context. Derived from :data:`~intraday_advisor.scoring.SCORED_FEATURES`
+#: rather than hand-maintained, because the hand-maintained version fell 73
+#: columns behind the scorer and silently made most weights uncalibratable.
+FEATURE_KEYS: tuple[str, ...] = tuple(sorted(set(SCORED_FEATURES) | set(_CONTEXT_KEYS)))
 
 
 def now_ist() -> datetime:

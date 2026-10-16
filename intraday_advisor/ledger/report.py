@@ -40,13 +40,42 @@ from intraday_advisor.ledger.schema import DEFAULT_LEDGER_PATH, connect, init_le
 # conclusion. 30 is the bare statistical minimum for a usable interval; 200+ is
 # where a win-rate estimate becomes tight enough to size on.
 MIN_SAMPLE_FOR_VERDICT = 30
-MIN_SAMPLE_FOR_CALIBRATION = 200
+
+# Trades needed per fitted weight before calibration is anything but curve
+# fitting. 15 is already generous for financial data, where the signal-to-noise
+# ratio is far worse than the textbook examples this rule of thumb comes from.
+TRADES_PER_WEIGHT = 15
+
+
+def _min_sample_for_calibration() -> int:
+    """Scale the calibration gate with the number of weights being fitted.
+
+    This was a flat 200, set when the scorer had 7 weights -- about 29 trades
+    per parameter. The indicator set has since grown to 37 weights, which at
+    200 trades is 5 per parameter: enough to fit the noise in those 200 trades
+    beautifully and nothing else. Deriving the gate means adding indicators
+    automatically raises the evidence bar instead of quietly lowering it.
+    """
+    from intraday_advisor.scoring import ScoreWeights
+
+    weights = len(ScoreWeights().__dataclass_fields__)
+    return max(200, weights * TRADES_PER_WEIGHT)
+
+
+MIN_SAMPLE_FOR_CALIBRATION = _min_sample_for_calibration()
 
 # Default score buckets. Deliberately coarse: finer bands just slice an already
 # small sample into noise.
 DEFAULT_BANDS = (0, 50, 60, 70, 80, 90, 101)
 
 Z_95 = 1.959963984540054
+
+
+
+def _weight_count() -> int:
+    from intraday_advisor.scoring import ScoreWeights
+
+    return len(ScoreWeights().__dataclass_fields__)
 
 
 def wilson_interval(successes: int, total: int, z: float = Z_95) -> tuple[float, float]:
@@ -505,17 +534,20 @@ def can_calibrate(*, db_path: str | Path = DEFAULT_LEDGER_PATH, **filters) -> di
     frame = load_graded(db_path=db_path, **filters)
     n = int(len(frame))
     sessions = int(frame["session_date"].nunique()) if not frame.empty else 0
-    ready = n >= MIN_SAMPLE_FOR_CALIBRATION and sessions >= 20
+    min_sessions = max(20, MIN_SAMPLE_FOR_CALIBRATION // 10)
+    ready = n >= MIN_SAMPLE_FOR_CALIBRATION and sessions >= min_sessions
     return {
         "ready": ready,
         "trades": n,
         "trades_needed": max(0, MIN_SAMPLE_FOR_CALIBRATION - n),
         "sessions": sessions,
-        "sessions_needed": max(0, 20 - sessions),
+        "sessions_needed": max(0, min_sessions - sessions),
         "reason": (
             "Enough data to attempt weight calibration with walk-forward validation."
             if ready else
-            f"Need {MIN_SAMPLE_FOR_CALIBRATION}+ trades across 20+ sessions; "
-            f"have {n} across {sessions}. Fitting now would fit noise."
+            f"Need {MIN_SAMPLE_FOR_CALIBRATION}+ trades across {min_sessions}+ "
+            f"sessions to fit {_weight_count()} weights at "
+            f"{TRADES_PER_WEIGHT} trades each; have {n} across {sessions}. "
+            f"Fitting now would fit noise."
         ),
     }

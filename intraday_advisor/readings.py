@@ -435,16 +435,243 @@ def heikin_ashi_reading(features: dict) -> Reading | None:
     return Reading("heikin_ashi", "Heikin-Ashi Trend", what, value, state, meaning, action)
 
 
+
+# --------------------------------------------------------------------------- #
+# The indicator set grew from 5 engines to 39. These cover the families that
+# actually change a decision; the rest surface through the score breakdown.
+# --------------------------------------------------------------------------- #
+
+def adx_reading(features: dict) -> Reading | None:
+    """ADX — trend STRENGTH, which is a different question from direction."""
+    adx = features.get("ADX")
+    if adx is None or adx == 0:
+        return None
+    adx = float(adx)
+    plus = float(features.get("Plus_DI") or 0)
+    minus = float(features.get("Minus_DI") or 0)
+
+    what = (
+        "Average Directional Index: how strong the trend is, regardless of "
+        "which way it points. +DI and -DI say the direction; ADX says whether "
+        "it is worth following. This is the filter that keeps you out of chop."
+    )
+    value = f"ADX {adx:.0f} (+DI {plus:.0f} / -DI {minus:.0f})"
+
+    if adx < 20:
+        return Reading(
+            "adx", "ADX (trend strength)", what, value, "caution",
+            "Below 20 means there is no trend — price is ranging.",
+            "Trend-following setups fail here. Breakouts mostly fail back into "
+            "the range. This is the single best reason to stand aside.",
+        )
+    if adx < 25:
+        state, meaning = "neutral", "20-25 is a trend trying to start but not yet established."
+        action = "Wait for ADX to clear 25 before trusting a breakout."
+    elif adx < 40:
+        state, meaning = ("bullish" if plus > minus else "bearish"), (
+            f"A healthy trend is in force, led by {'buyers' if plus > minus else 'sellers'}."
+        )
+        action = f"Trend-following works here. Favours {'CALL' if plus > minus else 'PUT'}."
+    else:
+        state, meaning = "caution", (
+            f"ADX above 40 is a very strong trend — but also a late one; this "
+            f"is where trends exhaust."
+        )
+        action = (
+            "Follow it, but do not add new size. Reversals from here are fast."
+        )
+    return Reading("adx", "ADX (trend strength)", what, value, state, meaning, action)
+
+
+def squeeze_reading(features: dict) -> Reading | None:
+    """TTM Squeeze — volatility coiling before it releases."""
+    on = features.get("Squeeze_On")
+    if on is None:
+        return None
+    momentum = float(features.get("Squeeze_Mom") or 0)
+    what = (
+        "Bollinger Bands squeezing inside Keltner Channels: volatility has "
+        "compressed. It does not say which way price breaks, only that a move "
+        "is being stored up. The momentum histogram hints at the direction."
+    )
+    if bool(on):
+        return Reading(
+            "squeeze", "TTM Squeeze", what, "SQUEEZE ON (coiling)", "caution",
+            "Volatility is compressed and a move is building. Ranges are "
+            "narrow right now.",
+            "Do not buy options into a squeeze — premium decays while you wait "
+            "and the range is too tight to reach a target. Wait for the fire.",
+        )
+    direction = "up" if momentum > 0 else "down"
+    return Reading(
+        "squeeze", "TTM Squeeze", what,
+        f"FIRED, momentum {momentum:+.2f} ({direction})",
+        "bullish" if momentum > 0 else "bearish",
+        f"The squeeze has released and momentum is pointing {direction}. These "
+        f"moves tend to run rather than fade.",
+        f"Supports a {'CALL' if momentum > 0 else 'PUT'}. The release is the "
+        f"entry; chasing it two bars late is not.",
+    )
+
+
+def vwap_band_reading(features: dict) -> Reading | None:
+    """VWAP standard-deviation bands — statistical stretch from fair value."""
+    extreme_up = features.get("VWAP_Extreme_Bull")
+    extreme_down = features.get("VWAP_Extreme_Bear")
+    bounce = features.get("VWAP_Bounce_Bull")
+    reject = features.get("VWAP_Rejection_Bear")
+    if not any((extreme_up, extreme_down, bounce, reject)):
+        return None
+
+    what = (
+        "Standard-deviation bands around VWAP. ±1σ is normal wandering; ±2σ and "
+        "±3σ are statistically stretched and tend to revert, because that is "
+        "where the day's traders are furthest offside."
+    )
+    if extreme_up:
+        return Reading("vwap_bands", "VWAP bands", what, "at/above +2σ", "caution",
+                       "Price is statistically stretched ABOVE fair value.",
+                       "A poor place to buy a CALL — you are paying for a move "
+                       "that has already happened and tends to revert.")
+    if extreme_down:
+        return Reading("vwap_bands", "VWAP bands", what, "at/below -2σ", "caution",
+                       "Price is statistically stretched BELOW fair value.",
+                       "A poor place to buy a PUT. If anything this favours a "
+                       "bounce back toward VWAP.")
+    if bounce:
+        return Reading("vwap_bands", "VWAP bands", what, "bounced off VWAP", "bullish",
+                       "Price dipped to VWAP in an uptrend and was bought.",
+                       "One of the cleanest CALL entries: a defined stop just "
+                       "below VWAP.")
+    return Reading("vwap_bands", "VWAP bands", what, "rejected at VWAP", "bearish",
+                   "Price rallied into VWAP in a downtrend and was sold.",
+                   "One of the cleanest PUT entries, with the stop just above VWAP.")
+
+
+def vsa_reading(features: dict) -> Reading | None:
+    """Volume Spread Analysis — what the volume says the professionals did."""
+    flags = {
+        "VSA_Stopping_Volume_Bull": ("bullish",
+            "Stopping volume: a heavy down-bar closed in its upper half — "
+            "someone large absorbed the selling."),
+        "VSA_Stopping_Volume_Bear": ("bearish",
+            "Buying climax: a heavy up-bar closed in its lower half — someone "
+            "large distributed into the strength."),
+        "VSA_No_Demand": ("bearish",
+            "No demand: price rose on dry volume. Buyers are not participating."),
+        "VSA_No_Supply": ("bullish",
+            "No supply: price fell on dry volume. Sellers are exhausted."),
+        "VSA_Effort_Vs_Result_Bull": ("bullish",
+            "Heavy effort, little downward result — selling is being absorbed."),
+        "VSA_Effort_Vs_Result_Bear": ("bearish",
+            "Heavy effort, little upward result — buying is being absorbed."),
+    }
+    fired = [(k, v) for k, v in flags.items() if features.get(k)]
+    if not fired:
+        return None
+
+    what = (
+        "Volume Spread Analysis: comparing a bar's volume against its range and "
+        "close position. The premise is that professionals leave footprints — "
+        "huge volume with no progress means someone is taking the other side."
+    )
+    key, (state, meaning) = fired[0]
+    action = (
+        "Supports a CALL — this is accumulation." if state == "bullish"
+        else "Supports a PUT — this is distribution."
+    )
+    return Reading("vsa", "Volume Spread Analysis", what,
+                   key.replace("VSA_", "").replace("_", " "), state, meaning, action)
+
+
+def divergence_reading(features: dict) -> Reading | None:
+    """Divergence — price and momentum disagreeing."""
+    flags = {
+        "RSI_Div_Bull": ("bullish", "RSI bullish divergence",
+            "Price made a lower low but RSI did not. The selling is losing force."),
+        "RSI_Div_Bear": ("bearish", "RSI bearish divergence",
+            "Price made a higher high but RSI did not. The buying is losing force."),
+        "MACD_Div_Bull": ("bullish", "MACD bullish divergence",
+            "Momentum is improving while price still falls — often an early bottom."),
+        "MACD_Div_Bear": ("bearish", "MACD bearish divergence",
+            "Momentum is fading while price still rises — often an early top."),
+        "RSI_Div_Hidden_Bull": ("bullish", "RSI hidden bullish divergence",
+            "A continuation signal: the pullback is shallower than momentum suggests."),
+        "RSI_Div_Hidden_Bear": ("bearish", "RSI hidden bearish divergence",
+            "A continuation signal: the bounce is weaker than momentum suggests."),
+    }
+    fired = [(k, v) for k, v in flags.items() if features.get(k)]
+    if not fired:
+        return None
+
+    what = (
+        "Divergence is price and momentum disagreeing. Price makes a new "
+        "extreme; the oscillator does not. It is a warning that the move is "
+        "running on fumes — but a warning, not a timing signal."
+    )
+    key, (state, label, meaning) = fired[0]
+    action = (
+        f"Supports a {'CALL' if state == 'bullish' else 'PUT'} — but divergence "
+        f"can persist far longer than it looks like it should. Wait for price "
+        f"to confirm before acting on it alone."
+    )
+    return Reading("divergence", "Divergence", what, label, state, meaning, action)
+
+
+def session_reading(features: dict) -> Reading | None:
+    """Where in the trading day we are — which changes what works."""
+    sessions = {
+        "Session_Opening_Drive": ("09:15-09:45", "Opening drive",
+            "The most volatile window. Ranges are set and false moves are common.",
+            "Highest opportunity and highest risk. Many traders simply wait out "
+            "the first 15 minutes."),
+        "Session_Initial_Balance": ("09:15-10:15", "Initial balance",
+            "The day's initial range is being established.",
+            "Breaks of this range later in the day carry more weight."),
+        "Session_Midday_Chop": ("11:30-12:45", "Midday chop",
+            "The lunch lull: volume dries up and ranges contract.",
+            "The worst window for buying options — low volume means moves stall "
+            "while premium keeps decaying."),
+        "Session_European_Open": ("12:45-13:45", "European open",
+            "London comes online and volume returns.",
+            "Trends often resume or reverse here. Worth waiting for."),
+        "Session_Power_Hour": ("14:15-15:15", "Power hour",
+            "Institutional unwinding and the day's strongest directional runs.",
+            "Good for momentum, but time decay is steep and square-off is close."),
+        "Session_Squareoff_Risk": ("15:15-15:30", "Square-off window",
+            "Intraday positions are being closed out across the market.",
+            "Do not open new positions. Yours will be closed whether you act or not."),
+    }
+    for key, (window, label, meaning, action) in sessions.items():
+        if features.get(key):
+            state = "caution" if key in (
+                "Session_Midday_Chop", "Session_Squareoff_Risk", "Session_Opening_Drive"
+            ) else "neutral"
+            return Reading(
+                "session", "Session window",
+                "Different parts of the day behave differently. Volume, range "
+                "and the reliability of a breakout all change with the clock.",
+                f"{label} ({window})", state, meaning, action,
+            )
+    return None
+
 def build_readings(signal: dict) -> list[dict]:
     """Every available reading for one signal, in the order worth reading."""
     features = signal.get("features") or {}
     builders = (
+        # Ordered by how much each changes a decision, not alphabetically.
+        session_reading(features),      # *when* you are matters before *what*
+        adx_reading(features),          # is there a trend at all to follow?
+        cpr_reading(features),          # the day's expected character
+        orb_reading(features),          # the session's decision point
         ema_reading(features),
-        cpr_reading(features),
-        orb_reading(features),
         vwap_reading(features),
+        vwap_band_reading(features),
+        squeeze_reading(features),
         supertrend_reading(features),
         heikin_ashi_reading(features),
+        divergence_reading(features),
+        vsa_reading(features),
         rsi_reading(features),
         atr_reading(features),
         chain_reading(signal),
@@ -599,6 +826,100 @@ GLOSSARY = [
             "especially near expiry."
         ),
         "use": "Confluence. The engine requires price and chain to agree.",
+    },
+    {
+        "term": "ADX / DMI",
+        "plain": "How strong the trend is, not which way.",
+        "detail": (
+            "Below 20 there is no trend and breakouts fail back into the range. "
+            "25-40 is a healthy trend worth following. Above 40 is strong but "
+            "late — where trends exhaust. +DI and -DI give the direction."
+        ),
+        "use": "The chop filter. Below 20, most directional setups are noise.",
+    },
+    {
+        "term": "CPR (Central Pivot Range)",
+        "plain": "Three levels from yesterday, which forecast today's character.",
+        "detail": (
+            "A NARROW CPR (<0.25%) historically precedes a trending day; a WIDE "
+            "one (>0.50%) a rangebound day. Above the top line is the bullish "
+            "side, below the bottom is bearish, and inside is the chop zone."
+        ),
+        "use": (
+            "Set your expectation before the open. Inside the CPR is the worst "
+            "place to take a directional option trade."
+        ),
+    },
+    {
+        "term": "Opening Range (ORB)",
+        "plain": "The high and low of the session's first minutes.",
+        "detail": (
+            "Most intraday ranges are set early. A decisive break on volume is "
+            "the day's cleanest directional signal; a failed break (a trap) is "
+            "its cleanest reversal, because it strands everyone who chased."
+        ),
+        "use": (
+            "The retest of a broken level is the best reward-to-risk entry of "
+            "the day — the stop sits just the other side of it."
+        ),
+    },
+    {
+        "term": "TTM Squeeze",
+        "plain": "Volatility coiling before it releases.",
+        "detail": (
+            "Bollinger Bands compressing inside Keltner Channels. It does not "
+            "predict direction, only that a move is being stored up. The "
+            "momentum histogram hints which way when it fires."
+        ),
+        "use": (
+            "Never buy options INTO a squeeze — premium decays while the range "
+            "is too tight to reach a target. Trade the release."
+        ),
+    },
+    {
+        "term": "VWAP bands (±1σ/2σ/3σ)",
+        "plain": "How statistically stretched price is from fair value.",
+        "detail": (
+            "±1σ is normal wandering. ±2σ and beyond is where the day's traders "
+            "are most offside, and price tends to revert toward VWAP."
+        ),
+        "use": "Do not chase into ±2σ. Fade it, or wait for the return to VWAP.",
+    },
+    {
+        "term": "VSA (Volume Spread Analysis)",
+        "plain": "Reading volume against range to see what professionals did.",
+        "detail": (
+            "Huge volume with no price progress means someone large is taking "
+            "the other side. A heavy down-bar closing in its upper half is "
+            "absorption; a heavy up-bar closing in its lower half is distribution."
+        ),
+        "use": "Spotting accumulation and distribution before price confirms.",
+    },
+    {
+        "term": "Divergence",
+        "plain": "Price and momentum disagreeing.",
+        "detail": (
+            "Price makes a new extreme, the oscillator does not — the move is "
+            "running on fumes. Regular divergence warns of reversal; hidden "
+            "divergence suggests continuation."
+        ),
+        "use": (
+            "A warning, not a timing signal. Divergence persists far longer "
+            "than it looks like it should. Wait for price to confirm."
+        ),
+    },
+    {
+        "term": "Session windows",
+        "plain": "Different parts of the day behave differently.",
+        "detail": (
+            "09:15-09:45 sets ranges violently. 11:30-12:45 is the lunch lull "
+            "where moves stall and premium decays. 14:15-15:15 is power hour. "
+            "15:15 onward is square-off."
+        ),
+        "use": (
+            "Midday is the worst window for buying options; the clock matters "
+            "as much as the chart."
+        ),
     },
     {
         "term": "Breakeven premium",
