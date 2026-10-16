@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 
 from intraday_advisor.data import drop_forming_candle
@@ -117,27 +118,16 @@ def analyse_underlying(df: pd.DataFrame) -> tuple[SignalScore | None, dict, list
     decision = ema_swing_breakout_decision(enriched.index.name or "INDEX", enriched)
     smart = analyze_smart_money(enriched)
 
-    row = {
-        "Bullish_OB": bool(last.get("Bullish_OB", False)),
-        "Bearish_OB": bool(last.get("Bearish_OB", False)),
-        "Bullish_FVG": bool(last.get("Bullish_FVG", False)),
-        "Bearish_FVG": bool(last.get("Bearish_FVG", False)),
-        "Liquidity_Sweep_Bullish": bool(last.get("Liquidity_Sweep_Bullish", False)),
-        "Liquidity_Sweep_Bearish": bool(last.get("Liquidity_Sweep_Bearish", False)),
-        "SuperTrend_Dir": int(last.get("SuperTrend_Dir", 0)),
-        "Adaptive_MACD_Hist": float(last.get("Adaptive_MACD_Hist", 0)),
-        # _num(), not `float(x) or 0`: NaN is truthy in Python, so the `or 0`
-        # idiom lets NaN straight through and it ends up in the JSON payload.
-        "RSI14": _num(last.get("RSI14")),
-        "ATR14": _num(last.get("ATR14")),
-        "VWAP": _num(last.get("VWAP")),
-        "EMA9": _num(last.get("EMA9")),
-        "EMA21": _num(last.get("EMA21")),
-        "EMA200": _num(last.get("EMA200")),
-        "Close": _num(last.get("Close")),
-        "Volume": _num(last.get("Volume")),
-        "ADTV20": _num(last.get("ADTV20")),
-    }
+    row = {}
+    for col, val in last.items():
+        if isinstance(val, (bool, np.bool_)):
+            row[col] = bool(val)
+        elif isinstance(val, (int, np.integer)):
+            row[col] = int(val)
+        elif isinstance(val, (float, np.floating)):
+            row[col] = _num(val)
+        else:
+            row[col] = val
     scored = score_signal(
         row, decision_signal=decision.signal, vwap_relation=smart.vwap_relation,
         weights=ScoreWeights.load(),

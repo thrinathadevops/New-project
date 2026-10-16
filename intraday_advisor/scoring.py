@@ -61,6 +61,29 @@ class ScoreWeights:
     # MA Ribbon
     ma_ribbon: float = 4.0         # Moving average ribbon alignment
 
+    # --- Extended Strategy Analyzers (added by comprehensive audit) ---
+    # CPR & Pivots
+    cpr_relation: float = 6.0      # Above TC (bullish) / Below BC (bearish)
+    cpr_virgin: float = 4.0        # Virgin CPR magnet / test
+    # Opening Range Breakout (ORB)
+    orb_breakout: float = 7.0      # 15m ORB breakout with volume
+    orb_retest: float = 6.0        # ORB retest confirmation
+    orb_trap: float = 6.0          # ORB fakeout / trap reversal
+    # VWAP Bands
+    vwap_bands: float = 5.0        # Bounce / Rejection off VWAP or extreme band
+    # Heikin-Ashi
+    heikin_ashi: float = 4.0       # HA strong trend (flat base/top)
+    # Gap Analysis
+    gap_signal: float = 4.0        # Gap & Go continuation or Gap Fade
+    # Volume Spread Analysis (VSA)
+    vsa: float = 6.0               # Stopping volume, No Demand/Supply, Effort vs Result
+    # Trend Filters (HMA & Chandelier)
+    hma_trend: float = 4.0         # Hull Moving Average trend / cross
+    chandelier: float = 4.0        # Chandelier trailing stop trend
+    # Advanced Candlesticks & Chart Patterns
+    advanced_candle: float = 5.0   # Hammer, Shooting star, Marubozu, Piercing, Dark cloud
+    chart_pattern: float = 7.0     # Double top/bottom W/M, Triangles
+
     # --- Option-chain confluence (index options only) ---
     chain_agreement: float = 12.0
     chain_conflict: float = 20.0
@@ -282,6 +305,118 @@ def score_signal(
         add("ma_ribbon", w.ma_ribbon, bull_msg="MA Ribbon fully bullish (all 8 EMAs aligned)")
     elif _truthy(row, "Ribbon_Bearish"):
         add("ma_ribbon", -w.ma_ribbon, bear_msg="MA Ribbon fully bearish (all 8 EMAs aligned)")
+
+    # --- CPR (Central Pivot Range) ---
+    if _truthy(row, "CPR_Above_TC"):
+        add("cpr_relation", w.cpr_relation, bull_msg="Price trading above CPR TC (strongly bullish zone)")
+    elif _truthy(row, "CPR_Below_BC"):
+        add("cpr_relation", -w.cpr_relation, bear_msg="Price trading below CPR BC (strongly bearish zone)")
+
+    # --- Opening Range Breakout (ORB) ---
+    if _truthy(row, "ORB_Breakout_Bull"):
+        add("orb_breakout", w.orb_breakout, bull_msg="15m ORB bullish breakout confirmed with volume")
+    elif _truthy(row, "ORB_Breakdown_Bear"):
+        add("orb_breakout", -w.orb_breakout, bear_msg="15m ORB bearish breakdown confirmed with volume")
+
+    if _truthy(row, "ORB_Retest_Bull"):
+        add("orb_retest", w.orb_retest, bull_msg="Bullish retest of 15m ORB boundary held")
+    elif _truthy(row, "ORB_Retest_Bear"):
+        add("orb_retest", -w.orb_retest, bear_msg="Bearish retest of 15m ORB boundary rejected")
+
+    if _truthy(row, "ORB_Trap_Bull"):
+        add("orb_trap", -w.orb_trap, bear_msg="Bull trap alert: false breakout failed back into ORB")
+    elif _truthy(row, "ORB_Trap_Bear"):
+        add("orb_trap", w.orb_trap, bull_msg="Bear trap alert: false breakdown failed back into ORB")
+
+    # --- VWAP Bands & Bounce ---
+    if _truthy(row, "VWAP_Bounce_Bull"):
+        add("vwap_bands", w.vwap_bands, bull_msg="Dynamic bounce off VWAP support with green close")
+    elif _truthy(row, "VWAP_Rejection_Bear"):
+        add("vwap_bands", -w.vwap_bands, bear_msg="Dynamic rejection at VWAP resistance with red close")
+
+    if _truthy(row, "VWAP_Extreme_Bull"):
+        add("vwap_bands", -w.vwap_bands * 0.7, bear_msg="Price at +3σ VWAP extreme (overextended, mean-reversion risk)")
+    elif _truthy(row, "VWAP_Extreme_Bear"):
+        add("vwap_bands", w.vwap_bands * 0.7, bull_msg="Price at -3σ VWAP extreme (oversold snapback candidate)")
+
+    # --- Heikin-Ashi Trend System ---
+    if _truthy(row, "HA_Strong_Bull"):
+        add("heikin_ashi", w.heikin_ashi, bull_msg="Heikin-Ashi strong bull candle (flat bottom, no lower wick)")
+    elif _truthy(row, "HA_Strong_Bear"):
+        add("heikin_ashi", -w.heikin_ashi, bear_msg="Heikin-Ashi strong bear candle (flat top, no upper wick)")
+
+    if _truthy(row, "HA_Exhaustion_Alert"):
+        if row.get("HA_Color", 0) > 0:
+            add("heikin_ashi", -w.heikin_ashi * 0.5, bear_msg="Heikin-Ashi exhaustion doji after bullish run")
+        else:
+            add("heikin_ashi", w.heikin_ashi * 0.5, bull_msg="Heikin-Ashi exhaustion doji after bearish run")
+
+    # --- Gap Analysis ---
+    if _truthy(row, "Gap_And_Go_Bull"):
+        add("gap_signal", w.gap_signal, bull_msg="Gap & Go bullish momentum continuation")
+    elif _truthy(row, "Gap_And_Go_Bear"):
+        add("gap_signal", -w.gap_signal, bear_msg="Gap & Go bearish momentum continuation")
+
+    if _truthy(row, "Gap_Fade_Bear"):
+        add("gap_signal", -w.gap_signal * 0.8, bear_msg="Gap fade short setup towards gap fill")
+    elif _truthy(row, "Gap_Fade_Bull"):
+        add("gap_signal", w.gap_signal * 0.8, bull_msg="Gap fade long setup towards gap fill")
+
+    # --- Volume Spread Analysis (VSA) ---
+    if _truthy(row, "VSA_Stopping_Volume_Bull"):
+        add("vsa", w.vsa, bull_msg="VSA Stopping Volume: smart money absorbing panic sellers")
+    elif _truthy(row, "VSA_Stopping_Volume_Bear"):
+        add("vsa", -w.vsa, bear_msg="VSA Buying Climax: smart money distributing into retail FOMO")
+
+    if _truthy(row, "VSA_No_Supply"):
+        add("vsa", w.vsa * 0.7, bull_msg="VSA No Supply: sellers exhausted on pullback")
+    elif _truthy(row, "VSA_No_Demand"):
+        add("vsa", -w.vsa * 0.7, bear_msg="VSA No Demand: buyers absent on bounce")
+
+    if _truthy(row, "VSA_Effort_Vs_Result_Bull"):
+        add("vsa", w.vsa * 0.8, bull_msg="VSA Effort vs Result: heavy absorption at lows")
+    elif _truthy(row, "VSA_Effort_Vs_Result_Bear"):
+        add("vsa", -w.vsa * 0.8, bear_msg="VSA Effort vs Result: heavy distribution at highs")
+
+    # --- Trend Filters (HMA & Chandelier) ---
+    if _truthy(row, "HMA_Cross_Bull") or (_truthy(row, "HMA_Bullish") and row.get("HMA_Slope", 0) > 0):
+        add("hma_trend", w.hma_trend, bull_msg="Hull Moving Average (HMA) upward momentum")
+    elif _truthy(row, "HMA_Cross_Bear") or (_truthy(row, "HMA_Bearish") and row.get("HMA_Slope", 0) < 0):
+        add("hma_trend", -w.hma_trend, bear_msg="Hull Moving Average (HMA) downward momentum")
+
+    if _truthy(row, "Chandelier_Bullish"):
+        add("chandelier", w.chandelier, bull_msg="Chandelier Trailing Exit confirms bull trend")
+    elif _truthy(row, "Chandelier_Bearish"):
+        add("chandelier", -w.chandelier, bear_msg="Chandelier Trailing Exit confirms bear trend")
+
+    # --- Advanced Candlestick Reversals ---
+    if (
+        _truthy(row, "Candle_Hammer")
+        or _truthy(row, "Candle_Inverted_Hammer")
+        or _truthy(row, "Candle_Piercing_Line")
+        or _truthy(row, "Candle_Marubozu_Bull")
+        or _truthy(row, "Candle_Inside_Breakout_Bull")
+    ):
+        add("advanced_candle", w.advanced_candle, bull_msg="High-probability bullish reversal/momentum candle")
+    elif (
+        _truthy(row, "Candle_Shooting_Star")
+        or _truthy(row, "Candle_Hanging_Man")
+        or _truthy(row, "Candle_Dark_Cloud")
+        or _truthy(row, "Candle_Marubozu_Bear")
+        or _truthy(row, "Candle_Inside_Breakout_Bear")
+    ):
+        add("advanced_candle", -w.advanced_candle, bear_msg="High-probability bearish reversal/momentum candle")
+
+    # --- Chart Patterns (Double Top/Bottom, Triangles) ---
+    if _truthy(row, "Pattern_Double_Bottom_W"):
+        add("chart_pattern", w.chart_pattern, bull_msg="Double Bottom (W Pattern) neckline breakout")
+    elif _truthy(row, "Pattern_Double_Top_M"):
+        add("chart_pattern", -w.chart_pattern, bear_msg="Double Top (M Pattern) neckline breakdown")
+
+    if _truthy(row, "Pattern_Ascending_Triangle"):
+        add("chart_pattern", w.chart_pattern * 0.8, bull_msg="Ascending Triangle bullish breakout")
+    elif _truthy(row, "Pattern_Descending_Triangle"):
+        add("chart_pattern", -w.chart_pattern * 0.8, bear_msg="Descending Triangle bearish breakdown")
 
     confidence = int(max(0, min(100, round(score))))
     if confidence >= buy_threshold:

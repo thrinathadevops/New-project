@@ -12,6 +12,16 @@ from . import structure_levels
 from . import candlestick_patterns
 from . import divergence_detection
 from . import ma_ribbon
+from . import cpr_levels
+from . import opening_range
+from . import vwap_bands
+from . import heikin_ashi
+from . import gap_analysis
+from . import vsa_wyckoff
+from . import trend_filters
+from . import advanced_candlesticks
+from . import chart_patterns
+from . import session_context
 
 # Keep the base indicators from indicators_old to supply ATR, Swing High, SMA, etc.
 def sma(series: pd.Series, window: int) -> pd.Series:
