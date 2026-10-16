@@ -324,13 +324,127 @@ def chain_reading(signal: dict) -> Reading | None:
     return Reading("chain", "Option chain", what, value, state, meaning, action)
 
 
+def cpr_reading(features: dict) -> Reading | None:
+    if not _has(features, "CPR_Pivot", "Close"):
+        return None
+    pivot = float(features["CPR_Pivot"])
+    tc = float(features.get("CPR_TC", pivot))
+    bc = float(features.get("CPR_BC", pivot))
+    close = float(features["Close"])
+    width_pct = float(features.get("CPR_Width_Pct", 0) or 0)
+
+    what = (
+        "Central Pivot Range (CPR): calculated from yesterday's High, Low, and Close. "
+        "TC (Top Central) and BC (Bottom Central) form a support/resistance ribbon."
+    )
+    value = f"CPR TC {_fmt(tc)} · Pivot {_fmt(pivot)} · BC {_fmt(bc)} (Width: {width_pct:.2f}%)"
+    if close > tc:
+        state = "bullish"
+        meaning = "Price is trading comfortably above CPR Top Central (TC) — buyers dominate the session."
+        action = "Favors CALL entries. Pullbacks into TC often offer dynamic support."
+    elif close < bc:
+        state = "bearish"
+        meaning = "Price is trading below CPR Bottom Central (BC) — sellers dominate the session."
+        action = "Favors PUT entries. Rallies into BC often offer dynamic resistance."
+    else:
+        state = "caution"
+        meaning = "Price is trapped INSIDE the CPR ribbon — a high-risk churn zone where breakouts frequently fail."
+        action = "Avoid initiating breakout trades inside CPR; wait for an exit outside TC or BC."
+
+    return Reading("cpr", "Central Pivot Range (CPR)", what, value, state, meaning, action)
+
+
+def orb_reading(features: dict) -> Reading | None:
+    if not _has(features, "ORB_15_High", "ORB_15_Low"):
+        return None
+    orb_h = float(features["ORB_15_High"])
+    orb_l = float(features["ORB_15_Low"])
+    close = float(features.get("Close", 0))
+
+    what = (
+        "Opening Range Breakout (ORB 15m): the high and low established during the initial "
+        "15 minutes of trading. A break outside this boundary often establishes the session's direction."
+    )
+    value = f"15m High {_fmt(orb_h)} · 15m Low {_fmt(orb_l)}"
+    if features.get("ORB_Breakout_Bull"):
+        state = "bullish"
+        meaning = "Bullish breakout above 15m Opening Range High with confirmed volume surge."
+        action = "High momentum CALL setup. Stop placed just inside the ORB high."
+    elif features.get("ORB_Breakdown_Bear"):
+        state = "bearish"
+        meaning = "Bearish breakdown below 15m Opening Range Low with confirmed volume surge."
+        action = "High momentum PUT setup. Stop placed just inside the ORB low."
+    elif features.get("ORB_Trap_Bull"):
+        state = "caution"
+        meaning = "Bull Trap detected: price poked above 15m High but fell back inside the range."
+        action = "Counter-trend PUT alert or exit long calls immediately."
+    elif features.get("ORB_Trap_Bear"):
+        state = "caution"
+        meaning = "Bear Trap detected: price dipped below 15m Low but snapped back inside the range."
+        action = "Counter-trend CALL alert or exit short puts immediately."
+    elif close > orb_h:
+        state = "bullish"
+        meaning = "Price is sustaining above the 15m Opening Range High."
+        action = "Bullish bias intact."
+    elif close < orb_l:
+        state = "bearish"
+        meaning = "Price is sustaining below the 15m Opening Range Low."
+        action = "Bearish bias intact."
+    else:
+        state = "neutral"
+        meaning = "Price is oscillating inside the 15m Opening Range."
+        action = "Rangebound; wait for a definitive volume breakout."
+
+    return Reading("orb", "Opening Range (15m ORB)", what, value, state, meaning, action)
+
+
+def heikin_ashi_reading(features: dict) -> Reading | None:
+    if "HA_Color" not in features:
+        return None
+    color = int(features.get("HA_Color", 0))
+    strong_bull = bool(features.get("HA_Strong_Bull", False))
+    strong_bear = bool(features.get("HA_Strong_Bear", False))
+    exhaustion = bool(features.get("HA_Exhaustion_Alert", False))
+    streak = int(features.get("HA_Streak", 0))
+
+    what = (
+        "Heikin-Ashi: filtered candle calculation removing market noise to display trend conviction."
+    )
+    value = f"Streak: {streak:+d} bars · Strong Bull: {strong_bull} · Strong Bear: {strong_bear}"
+    if exhaustion:
+        state = "caution"
+        meaning = "Exhaustion Doji printed after an extended trend streak — momentum may be rolling over."
+        action = "Tighten trailing stops or consider taking partial profits."
+    elif strong_bull:
+        state = "bullish"
+        meaning = "Strong bull candle with flat bottom (no lower shadow) — buyers in full control."
+        action = "Ideal trend-following environment for CALLs."
+    elif strong_bear:
+        state = "bearish"
+        meaning = "Strong bear candle with flat top (no upper shadow) — sellers in full control."
+        action = "Ideal trend-following environment for PUTs."
+    elif color > 0:
+        state = "bullish"
+        meaning = "Green Heikin-Ashi candle, moderate upward bias."
+        action = "Mild bullish confirmation."
+    else:
+        state = "bearish"
+        meaning = "Red Heikin-Ashi candle, moderate downward bias."
+        action = "Mild bearish confirmation."
+
+    return Reading("heikin_ashi", "Heikin-Ashi Trend", what, value, state, meaning, action)
+
+
 def build_readings(signal: dict) -> list[dict]:
     """Every available reading for one signal, in the order worth reading."""
     features = signal.get("features") or {}
     builders = (
         ema_reading(features),
+        cpr_reading(features),
+        orb_reading(features),
         vwap_reading(features),
         supertrend_reading(features),
+        heikin_ashi_reading(features),
         rsi_reading(features),
         atr_reading(features),
         chain_reading(signal),
