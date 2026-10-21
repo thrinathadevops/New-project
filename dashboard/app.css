@@ -620,7 +620,15 @@ details.why[open] > summary::before { content: "▾ "; }
 
 /* Container sized to include the x-axis band, so the card never gets a tiny
    nested scrollbar. */
-.chart-wrap { position: relative; width: 100%; height: 400px; }
+/* Height tracks the viewport so a desktop screen is actually used. A fixed
+   400px left most of a 1440p window empty while the candles stayed cramped.
+   clamp keeps it sane at both ends: never shorter than a readable 380px,
+   never so tall that the panels below drop off the fold. */
+.chart-wrap {
+  position: relative;
+  width: 100%;
+  height: clamp(380px, calc(100vh - 330px), 860px);
+}
 .chart-wrap canvas { display: block; width: 100%; height: 100%; }
 
 .tooltip {
@@ -840,7 +848,7 @@ table.data td.neg { color: var(--critical); font-weight: 600; }
   .controls { gap: 13px; }
   .field input[type="number"], .field select { width: 100%; }
   .field, .field--range { flex: 1 1 140px; min-width: 0; }
-  .chart-wrap { height: 320px; }
+  .chart-wrap { height: clamp(300px, 52vh, 460px); }
   .hero__value { font-size: 33px; }
   .toasts { width: calc(100vw - 24px); right: 12px; }
 }

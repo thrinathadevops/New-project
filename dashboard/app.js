@@ -1319,6 +1319,7 @@ function tick() {
 
 function setChartData(signal) {
   const chartData = (signal && signal.chart) || { closed: [], forming: null };
+  chart.signal = signal || null;
   chart.bars = chartData.closed || [];
   chart.forming = chartData.forming || null;
 
@@ -1330,6 +1331,270 @@ function setChartData(signal) {
   }
   renderChartTable();
   drawChart();
+}
+
+// ----------------------------------------------------- what to buy, on chart ---
+
+/** The reference levels worth drawing, in INDEX POINTS.
+ *
+ *  Units discipline: this chart's y-axis is the index, while entry, stop and
+ *  target are option PREMIUMS. Drawing a Rs 172.80 premium onto a 22,750-point
+ *  axis would be a category error, so premiums belong in the ticket panel and
+ *  only genuine index levels become lines.
+ *
+ *  Tone follows what a level means FOR THIS TRADE, not what it is: the wall you
+ *  take profit into is good news, the one standing in your way is not.
+ */
+function overlayLevels(signal) {
+  if (!signal) return [];
+  const dir = signal.direction;
+  const levels = (signal.regime && signal.regime.levels) || {};
+  const out = [];
+
+  if (signal.strike > 0 && dir !== 'WAIT') {
+    out.push({
+      value: signal.strike, tone: 'neutral', weight: 2,
+      label: `STRIKE ${signal.strike.toFixed(0)} ${signal.option_type || ''}`.trim(),
+    });
+  }
+  // A PUT books into the put wall below it; a CALL into the call wall above.
+  if (signal.pe_wall > 0) {
+    out.push({
+      value: signal.pe_wall, weight: 1,
+      tone: dir === 'PUT' ? 'good' : dir === 'CALL' ? 'bad' : 'neutral',
+      label: `PUT WALL ${signal.pe_wall.toFixed(0)}${
+        dir === 'PUT' ? ' - book here' : ''}`,
+    });
+  }
+  if (signal.ce_wall > 0) {
+    out.push({
+      value: signal.ce_wall, weight: 1,
+      tone: dir === 'CALL' ? 'good' : dir === 'PUT' ? 'bad' : 'neutral',
+      label: `CALL WALL ${signal.ce_wall.toFixed(0)}${
+        dir === 'CALL' ? ' - book here' : ''}`,
+    });
+  }
+  if (levels.prev_close > 0) {
+    out.push({
+      value: levels.prev_close, tone: 'muted', weight: 1,
+      label: `PREV CLOSE ${levels.prev_close.toFixed(0)}`,
+    });
+  }
+  return out;
+}
+
+const LEVEL_INK = {
+  good: '--good', bad: '--critical', neutral: '--text-secondary',
+  muted: '--text-muted',
+};
+
+/** Horizontal reference lines, with an edge chip for anything off-scale. */
+function drawLevels(ctx, g) {
+  const all = overlayLevels(chart.signal);
+  if (!all.length) return;
+
+  ctx.save();
+  ctx.font = '10px ' + cssVar('--font');
+  ctx.textBaseline = 'middle';
+  // Explicit: textAlign is canvas-global and drawGrid leaves it on 'right'.
+  // save() preserves the INHERITED value, it does not reset to the default,
+  // so every label here was right-aligned and ran off the left edge.
+  ctx.textAlign = 'left';
+  const spot = (chart.signal && chart.signal.spot) || 0;
+
+  for (const level of all) {
+    const ink = cssVar(LEVEL_INK[level.tone] || '--text-muted');
+    const inside = level.value >= g.low && level.value <= g.high;
+
+    if (!inside) {
+      // Off-scale: say which way and how far rather than silently dropping a
+      // level the trade depends on.
+      const above = level.value > g.high;
+      const y = above ? g.plotTop + 8 : g.plotBottom - 8;
+      const pts = spot ? Math.abs(level.value - spot) : 0;
+      const text = `${above ? '↑' : '↓'} ${level.label}${
+        pts ? ` (${pts.toFixed(0)} pts away)` : ''}`;
+      const w = ctx.measureText(text).width + 12;
+      ctx.fillStyle = cssVar('--surface-2');
+      ctx.globalAlpha = 0.92;
+      roundRect(ctx, g.plotLeft + 4, y - 8, w, 16, 4);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = ink;
+      ctx.fillText(text, g.plotLeft + 10, y);
+      continue;
+    }
+
+    const y = g.y(level.value);
+    const w = ctx.measureText(level.label).width + 12;
+
+    // The right edge already carries the price axis, the EMA/VWAP end labels
+    // and the last-price tag, and a chip there collided with "EMA 9". The left
+    // edge is free except under the ticket, so prefer left and fall back to
+    // right only where the ticket would cover the label.
+    const onLeft = y > g.plotTop + ticketHeight(chart.signal) + 8;
+    const x = onLeft ? g.plotLeft + 2 : g.plotRight - w - 2;
+
+    // Stop the line where the chip begins: running it edge to edge left a stub
+    // poking past the label, which reads as a rendering fault.
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = level.weight;
+    ctx.globalAlpha = level.tone === 'muted' ? 0.45 : 0.7;
+    ctx.beginPath();
+    if (onLeft) {
+      ctx.moveTo(x + w + 4, y);
+      ctx.lineTo(g.plotRight, y);
+    } else {
+      ctx.moveTo(g.plotLeft, y);
+      ctx.lineTo(x - 4, y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = cssVar('--surface-1');
+    ctx.globalAlpha = 0.9;
+    roundRect(ctx, x, y - 8, w, 16, 4);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = ink;
+    ctx.fillText(level.label, x + 6, y);
+  }
+  ctx.restore();
+}
+
+/** The trade ticket: what to buy, at what price, and what it costs you.
+ *
+ *  This exists because reading a chart plus four panels and arriving at
+ *  "buy one lot of the 22750 PE at Rs 172.80" is work the screen should do.
+ */
+/** The ticket's content, built separately so its height is known before the
+ *  levels are drawn -- a level chip must not land underneath the panel. */
+function ticketContent(signal) {
+  if (!signal) return null;
+  const plan = signal.plan || {};
+  const agent = signal.agent || {};
+  const trading = signal.direction === 'CALL' || signal.direction === 'PUT';
+  const lines = [];
+  let headline;
+  let tone;
+
+  if (!trading) {
+    headline = 'NO TRADE — STAND ASIDE';
+    tone = '--text-secondary';
+    lines.push(signal.agreement === 'conflict'
+      ? 'Price and the option chain disagree.'
+      : 'No directional edge in the indicators right now.');
+    lines.push('Watch the marked levels; act when one breaks with agreement.');
+  } else {
+    headline = `BUY  ${signal.index} ${signal.strike.toFixed(0)} ${signal.option_type}`;
+    tone = signal.direction === 'CALL' ? '--good' : '--critical';
+    lines.push(
+      `entry ₹${(signal.entry_premium || 0).toFixed(2)}`
+      + `    stop ₹${(signal.stop_premium || 0).toFixed(2)}`
+      + `    target ₹${(signal.target_premium || 0).toFixed(2)}`
+    );
+    if (plan.affordable) {
+      lines.push(
+        `${plan.lots} lot × ${plan.lot_size || ''} = ${
+          rupees(plan.deployed_capital)}    ·  one stop costs ${
+          percent(plan.risk_pct_of_capital)} of capital`
+      );
+      lines.push(
+        `flat at ₹${(plan.breakeven || 0).toFixed(2)} after costs — `
+        + `below that you are losing even while the premium is up`
+      );
+    } else {
+      lines.push(
+        `NOT AFFORDABLE — one lot needs ${rupees(plan.capital_per_lot)}, `
+        + `you can deploy ${rupees(
+          plan.spendable_capital ?? plan.available_capital)}`
+      );
+    }
+  }
+
+  if (agent.stance) {
+    const mark = { PROCEED: '✓', CAUTION: '!', VETO: '⛔' }[agent.stance] || '';
+    // The agent's verdict is cached per CANDLE (deliberately -- an LLM call
+    // every refresh would burn a free tier in an hour), while the plan above
+    // re-prices every snapshot as the premium moves. So the agent's own risk
+    // percentage goes stale and the panel showed the same fact twice with two
+    // different numbers ("12.3% of capital" above, "11.3% of the account"
+    // below). The plan is the live source for risk, so drop any concern that
+    // merely restates it and show the next one, which adds something.
+    const concerns = (agent.concerns || []).filter(
+      (c) => !/%\s*of\s*(the\s*)?(account|capital)/i.test(c));
+    const first = concerns[0] || '';
+    lines.push(`${mark} ${agent.stance}${first ? '  —  ' + first : ''}`);
+  }
+
+  return { headline, lines, tone };
+}
+
+/** How tall the ticket will be, so drawLevels can keep clear of it. */
+function ticketHeight(signal) {
+  const content = ticketContent(signal);
+  return content ? 20 + 21 + content.lines.length * 16 + 6 : 0;
+}
+
+function drawTicket(ctx, g) {
+  const content = ticketContent(chart.signal);
+  if (!content) return;
+  const { headline, lines, tone } = content;
+
+  // Measure first, then draw: the panel fits its content, not the reverse.
+  ctx.save();
+  ctx.textAlign = 'left';   // see drawLevels: inherited from drawGrid
+  const padX = 11;
+  const padY = 10;
+  const maxWidth = (g.plotRight - g.plotLeft) - 16;
+  ctx.font = '600 15px ' + cssVar('--font');
+  let boxWidth = ctx.measureText(headline).width;
+  ctx.font = '11.5px ' + cssVar('--font');
+  for (const line of lines) {
+    boxWidth = Math.max(boxWidth, ctx.measureText(line).width);
+  }
+  boxWidth = Math.min(boxWidth + padX * 2, maxWidth);
+  const boxHeight = padY * 2 + 21 + lines.length * 16;
+  const x = g.plotLeft + 6;
+  const y = g.plotTop + 6;
+
+  ctx.fillStyle = cssVar('--surface-2');
+  ctx.globalAlpha = 0.95;
+  roundRect(ctx, x, y, boxWidth, boxHeight, 8);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = cssVar('--border-strong');
+  ctx.lineWidth = 1;
+  roundRect(ctx, x + 0.5, y + 0.5, boxWidth - 1, boxHeight - 1, 8);
+  ctx.stroke();
+
+  // A spine in the verdict's colour, so the answer reads at a glance.
+  ctx.fillStyle = cssVar(tone);
+  roundRect(ctx, x, y, 3, boxHeight, 2);
+  ctx.fill();
+
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = cssVar(tone);
+  ctx.font = '600 15px ' + cssVar('--font');
+  ctx.fillText(headline, x + padX, y + padY, boxWidth - padX * 2);
+
+  ctx.font = '11.5px ' + cssVar('--font');
+  ctx.fillStyle = cssVar('--text-secondary');
+  lines.forEach((line, i) => {
+    ctx.fillText(line, x + padX, y + padY + 23 + i * 16, boxWidth - padX * 2);
+  });
+  ctx.restore();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const radius = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
 }
 
 function chartGeometry() {
@@ -1360,6 +1625,21 @@ function chartGeometry() {
       }
     }
   }
+  // Pull a marked level into view only when it is JUST off the edge. The
+  // first attempt allowed 45% of the candle span, which dragged the 22,500
+  // put wall onto a chart whose candles bottomed at 22,710 and left a quarter
+  // of the plot empty -- the exact dead space this chart was widened to
+  // remove. Anything further away is worth more as an edge chip (which states
+  // the distance) than as a line bought with blank chart.
+  const candleSpan = (high - low) || 1;
+  for (const level of overlayLevels(chart.signal)) {
+    if (level.value < low && (low - level.value) < candleSpan * 0.12) {
+      low = level.value;
+    } else if (level.value > high && (level.value - high) < candleSpan * 0.12) {
+      high = level.value;
+    }
+  }
+
   const span = (high - low) || 1;
   low -= span * 0.06;
   high += span * 0.06;
@@ -1392,6 +1672,7 @@ function drawChart() {
   }
 
   drawGrid(ctx, geometry);
+  drawLevels(ctx, geometry);
   const labels = [
     drawSeriesLine(ctx, geometry, 'vwap', cssVar('--series-1'), 'VWAP'),
     drawSeriesLine(ctx, geometry, 'ema9', cssVar('--series-2'), 'EMA 9'),
@@ -1400,6 +1681,8 @@ function drawChart() {
   drawCandles(ctx, geometry);
   drawSeriesLabels(ctx, geometry, labels);
   drawCrosshair(ctx, geometry);
+  // Last, so the instruction is never hidden behind a candle.
+  drawTicket(ctx, geometry);
 
   // Tell the legend which series actually rendered. Index candles from Yahoo
   // often carry no volume, so VWAP is NaN and no line is drawn — a legend
@@ -1665,6 +1948,63 @@ function renderChartTable() {
     </tr>`).join('');
 }
 
+/** A text twin of the on-chart ticket.
+ *
+ *  The chart is a <canvas role="img">, so anything drawn only in pixels is
+ *  invisible to a screen reader, to the table view, and to anyone who cannot
+ *  separate the colours. The instruction is the one thing on this screen that
+ *  must never be pixels-only, so it is also written out here and into the
+ *  canvas's own aria-label.
+ */
+function chartGuideText(signal, snapshot) {
+  if (!signal) return '';
+  const plan = signal.plan || {};
+  const parts = [];
+
+  if (signal.direction === 'CALL' || signal.direction === 'PUT') {
+    parts.push(
+      `What to buy: ${signal.index} ${signal.strike} ${signal.option_type} `
+      + `near ₹${(signal.entry_premium || 0).toFixed(2)}. `
+      + `Stop ₹${(signal.stop_premium || 0).toFixed(2)}, `
+      + `target ₹${(signal.target_premium || 0).toFixed(2)}.`
+    );
+    if (plan.affordable) {
+      parts.push(
+        `Size ${plan.lots} lot of ${plan.lot_size} = ${
+          rupees(plan.deployed_capital)}; one stop-out costs ${
+          percent(plan.risk_pct_of_capital)} of capital. You break even at `
+        + `₹${(plan.breakeven || 0).toFixed(2)}, not at the entry.`
+      );
+    } else {
+      parts.push(
+        `Not affordable: one lot needs ${rupees(plan.capital_per_lot)} and you `
+        + `can deploy ${rupees(plan.spendable_capital ?? plan.available_capital)}.`
+      );
+    }
+  } else {
+    parts.push('No trade: the indicators give no directional edge, so the '
+      + 'marked levels are what to watch rather than something to buy.');
+  }
+
+  const levels = overlayLevels(signal);
+  if (levels.length) {
+    parts.push('Levels marked on the chart: '
+      + levels.map((l) => `${l.label} at ${l.value.toFixed(0)}`).join('; ') + '.');
+  }
+  const agent = signal.agent || {};
+  if (agent.stance) {
+    parts.push(`Risk check: ${agent.stance}${
+      agent.concerns && agent.concerns.length
+        ? ' — ' + agent.concerns[0] : ''}`);
+  }
+  const forming = signal.chart && signal.chart.forming;
+  parts.push(forming
+    ? `The outlined bar is still forming — shown but never scored, because `
+      + `signals come only from closed candles. Interval ${snapshot.interval}.`
+    : `All candles closed. Interval ${snapshot.interval}.`);
+  return parts.join(' ');
+}
+
 function renderChartChrome(snapshot) {
   const tabs = $('chart-tabs');
   if (!state.selectedIndex && snapshot.signals.length) {
@@ -1702,9 +2042,14 @@ function renderChartChrome(snapshot) {
 
   const signal = snapshot.signals.find((s) => s.index === state.selectedIndex);
   const forming = signal && signal.chart && signal.chart.forming;
-  setText($('chart-note'), forming
+  const selected = snapshot.signals.find((s) => s.index === state.selectedIndex);
+  const guide = chartGuideText(selected, snapshot);
+  setText($('chart-note'), guide || (forming
     ? `Outlined bar is still forming — signals are computed only from closed candles, so it is shown but never scored. Interval ${snapshot.interval}.`
-    : `All candles closed. Interval ${snapshot.interval}.`);
+    : `All candles closed. Interval ${snapshot.interval}.`));
+  // The canvas is role="img": its label has to carry the same instruction.
+  const canvas = $('chart');
+  if (canvas && guide) canvas.setAttribute('aria-label', guide);
 }
 
 // ------------------------------------------------------------- commands ----
