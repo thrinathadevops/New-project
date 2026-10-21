@@ -221,3 +221,87 @@ def test_a_random_walk_is_called_neither():
     note = autocorrelation_note(series(900, seed=21))
     assert note["character"] == "neither"
     assert "random walk" in note["meaning"]
+
+
+# ============================== the gate that caught the fake strategy =====
+
+from intraday_advisor.validation import EdgeStudy, validate_rule  # noqa: E402
+
+
+def study_stub(mean_pct: float, t_stat: float, n: int = 3_000,
+               instrument: str = "equity") -> EdgeStudy:
+    cost = COST_INDEX_PCT[instrument]
+    return EdgeStudy(
+        label="stub", horizon_bars=20, observations=n,
+        mean_pct=mean_pct, t_stat=t_stat, win_rate=50.0,
+        net_by_instrument={instrument: {
+            "cost_pct": cost,
+            "net_pct": round(mean_pct - cost, 5),
+            "profitable": mean_pct - cost > 0,
+        }},
+    )
+
+
+def test_the_measured_contrarian_result_is_rejected():
+    """The exact numbers that nearly shipped: a 20-day contrarian hold with a
+    holdout t of +2.61 and +0.260% excess, which cleared the 0.19% cost -- and
+    a TRAIN t of -2.03. It looked like the answer and was a regime."""
+    verdict = validate_rule(
+        train=study_stub(-0.1384, -2.03),
+        test=study_stub(+0.2600, +2.61),
+        instrument="equity", hypotheses_tested=20,
+    )
+    assert verdict.tradeable is False
+    assert verdict.checks["sign_agreement"] is False
+    assert any("traded the second one backwards" in r for r in verdict.reasons)
+
+
+def test_searching_many_hypotheses_raises_the_bar():
+    """Reporting the best of 20 cells needs more evidence than testing one."""
+    one = validate_rule(train=study_stub(0.30, 2.2), test=study_stub(0.30, 2.2),
+                        hypotheses_tested=1)
+    many = validate_rule(train=study_stub(0.30, 2.2), test=study_stub(0.30, 2.2),
+                         hypotheses_tested=20)
+    assert many.checks["required_t"] > one.checks["required_t"]
+    assert one.tradeable is True
+    assert many.tradeable is False
+
+
+def test_a_rule_that_passes_all_four_is_tradeable():
+    verdict = validate_rule(
+        train=study_stub(0.45, 3.1), test=study_stub(0.38, 2.6),
+        instrument="equity", hypotheses_tested=1,
+    )
+    assert verdict.tradeable is True
+    assert all(verdict.checks[k] for k in
+               ("sign_agreement", "holdout_significance", "clears_costs", "sample"))
+
+
+def test_a_real_and_significant_edge_below_costs_is_still_rejected():
+    """Consistent, significant, and too small: the intraday BANKNIFTY case."""
+    verdict = validate_rule(
+        train=study_stub(0.041, 4.08), test=study_stub(0.111, 3.87),
+        instrument="equity", hypotheses_tested=1,
+    )
+    assert verdict.tradeable is False
+    assert verdict.checks["sign_agreement"] is True
+    assert verdict.checks["holdout_significance"] is True
+    assert verdict.checks["clears_costs"] is False
+
+
+def test_a_thin_sample_is_rejected_however_good_it_looks():
+    verdict = validate_rule(
+        train=study_stub(0.50, 5.0, n=10), test=study_stub(0.50, 5.0, n=10),
+        hypotheses_tested=1,
+    )
+    assert verdict.tradeable is False
+    assert verdict.checks["sample"] is False
+
+
+def test_every_failed_check_is_explained():
+    verdict = validate_rule(
+        train=study_stub(-0.20, -2.5, n=5), test=study_stub(+0.05, +0.4, n=5),
+        hypotheses_tested=20,
+    )
+    assert verdict.tradeable is False
+    assert len(verdict.reasons) == 4, "all four failures named, not just the first"

@@ -282,3 +282,100 @@ def autocorrelation_note(frame: pd.DataFrame, lag: int = 1) -> dict:
         "character": character,
         "meaning": meaning,
     }
+
+
+# --------------------------------------------------------------------------- #
+# The gate: is a result an edge, or a story about one window?
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class RuleVerdict:
+    """Whether a measured rule may be traded, and precisely why not."""
+
+    tradeable: bool = False
+    reasons: list[str] = field(default_factory=list)
+    checks: dict = field(default_factory=dict)
+
+    def as_dict(self) -> dict:
+        from dataclasses import asdict
+        return asdict(self)
+
+
+def validate_rule(
+    train: EdgeStudy, test: EdgeStudy, *, instrument: str = "equity",
+    hypotheses_tested: int = 1, min_t: float = 2.0,
+) -> RuleVerdict:
+    """Four checks a rule must pass before it is allowed to be called an edge.
+
+    Written immediately after it would have caught me shipping a fake one.
+
+    Searching 5 years of Nifty-50 daily bars for a contrarian edge produced 20
+    cells (5 horizons x 2 directions x 2 windows). One cleared costs: a 20-day
+    contrarian hold, test t = +2.61, excess +0.260% against a 0.19% cost. It
+    looked like the answer. Its **train** t was **-2.03** -- significantly
+    negative in the same data a rule would have been fitted on. Seven of ten
+    train/test pairs flipped sign, and nothing was significant in both windows
+    at once. That is regime dependence plus multiple testing, not an edge.
+
+    The checks:
+
+    1. **Sign agreement.** A real effect does not reverse between the first 70%
+       of history and the last 30%. A flip means the rule describes a regime.
+    2. **Holdout significance**, adjusted for how many hypotheses were tried.
+       Testing 20 cells and reporting the best needs a higher bar than testing
+       one: the threshold is scaled by sqrt(log(n)), a practical stand-in for a
+       Bonferroni-style correction that does not collapse to absurdity at n=20.
+    3. **Costs cleared in the holdout**, on the instrument actually traded.
+    4. **Enough observations** for the win rate to mean anything.
+
+    All four, or it is not tradeable. Three of four is a story.
+    """
+    verdict = RuleVerdict()
+    checks: dict = {}
+
+    same_sign = (train.mean_pct > 0) == (test.mean_pct > 0)
+    checks["sign_agreement"] = same_sign
+    if not same_sign:
+        verdict.reasons.append(
+            f"Sign flips between windows: train {train.mean_pct:+.4f}%, test "
+            f"{test.mean_pct:+.4f}%. A rule fitted on the first window would "
+            f"have traded the second one backwards."
+        )
+
+    adjusted_min_t = min_t * math.sqrt(max(1.0, math.log(max(hypotheses_tested, 1) + 1)))
+    significant = abs(test.t_stat) >= adjusted_min_t
+    checks["holdout_significance"] = significant
+    checks["required_t"] = round(adjusted_min_t, 2)
+    if not significant:
+        verdict.reasons.append(
+            f"Holdout t={test.t_stat:+.2f} is below the {adjusted_min_t:.2f} "
+            f"required after searching {hypotheses_tested} hypothes"
+            f"{'is' if hypotheses_tested == 1 else 'es'}."
+        )
+
+    net = test.net_by_instrument.get(instrument, {})
+    clears = bool(net.get("profitable"))
+    checks["clears_costs"] = clears
+    if not clears:
+        verdict.reasons.append(
+            f"Holdout edge {test.mean_pct:+.4f}% does not clear the "
+            f"{COST_INDEX_PCT.get(instrument, 0):.2f}% {instrument} round trip."
+        )
+
+    enough = test.observations >= MIN_SAMPLE and train.observations >= MIN_SAMPLE
+    checks["sample"] = enough
+    if not enough:
+        verdict.reasons.append(
+            f"Too few observations: train {train.observations}, "
+            f"test {test.observations}."
+        )
+
+    verdict.checks = checks
+    verdict.tradeable = same_sign and significant and clears and enough
+    if verdict.tradeable:
+        verdict.reasons.append(
+            f"Passes all four: same sign in both windows, holdout t="
+            f"{test.t_stat:+.2f} over the {adjusted_min_t:.2f} bar, and "
+            f"{net.get('net_pct', 0):+.4f}% net of {instrument} costs."
+        )
+    return verdict
