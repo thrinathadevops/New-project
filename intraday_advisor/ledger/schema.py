@@ -211,6 +211,33 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_session ON positions(session_date);
 
+-- The legs of a multi-leg structure (a vertical, an iron condor).
+--
+-- Added rather than reshaping ``positions`` because that table is the one the
+-- live monitor, the grader and five years of reports already read. A
+-- single-leg position writes NO rows here and behaves exactly as before, so
+-- an existing ledger migrates by simply being opened: executescript is
+-- idempotent and CREATE TABLE IF NOT EXISTS is a no-op on the old shape.
+--
+-- For a structure the parent row carries the NET figures -- entry_premium is
+-- the net debit per unit, positive for a debit and negative for a credit --
+-- and option_type is 'MULTI'. Every consumer that wants the detail joins
+-- here; every consumer that only wants the net keeps working untouched.
+CREATE TABLE IF NOT EXISTS position_legs (
+    position_id     TEXT NOT NULL,
+    leg_index       INTEGER NOT NULL,
+    option_type     TEXT NOT NULL,   -- CE / PE
+    strike          REAL NOT NULL,
+    action          TEXT NOT NULL,   -- BUY / SELL
+    lots            INTEGER NOT NULL,
+    entry_premium   REAL NOT NULL,
+    exit_premium    REAL,
+    option_token    TEXT,
+    PRIMARY KEY (position_id, leg_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_legs_position ON position_legs(position_id);
+
 -- --------------------------------------------------------------- reporting
 -- Signals joined to outcomes, synthetic data excluded. Every report reads
 -- this rather than re-deriving the join (and re-forgetting the filter).
