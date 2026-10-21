@@ -259,3 +259,211 @@ Those refusals are measurable. Every vetoed setup is still recorded by the
 ledger, so in time you can ask the only question that settles it: **would the
 vetoed trades have made money?** If the agent is blocking winners, that shows up
 and the thresholds change.
+
+---
+
+# What was missing (2026-10-21, after researching the field)
+
+You asked what the app was missing to find a good trade. The honest answer was
+not another indicator. `scoring.py` already carries **37 weights across 32
+price components** — SuperTrend, PSAR, MACD, ADX, ribbons, Chandelier, candle
+patterns, VSA. Every one of them is a function of the same OHLC series, so they
+are not 32 pieces of evidence; they are 32 views of one piece. That is why the
+score saturates, why ranking was once a 30-way tie, and why `validation.py`
+measured no usable edge in it. **A 33rd function of the same prices adds
+nothing.**
+
+Three things were genuinely missing, and all three attack the constraint that
+actually binds — cost, and knowing what is real.
+
+## 1. The most important number in the system was a guess
+
+`ledger/costs.py` modelled the bid-ask spread as `half_spread_pct = 0.0025` —
+a flat 0.25% per leg, the same for a liquid ATM weekly and a dead far-month
+wing. That constant decides whether any trade clears its costs, so it decides
+every verdict the app gives. It was never measured. The module even provided
+`with_measured_spread()` for exactly this purpose and **nothing ever called
+it.**
+
+Meanwhile `nse_option_chain.py` was already asking Angel One for `FULL` mode
+market data on every refresh, and FULL mode returns **five levels of bid and
+ask depth per contract**. The parser kept `ltp` and `oi` and threw the book
+away.
+
+So the cost that beats every edge was assumed, while the data to measure it
+arrived and was discarded.
+
+**`intraday_advisor/microstructure.py`** closes that. It parses the depth, and
+the spread is now measured per contract and flows into the cost model, the
+breakeven, the cost drag and the ranking.
+
+Why it matters at these premium levels: a Rs 2 spread is routine on an index
+option. On a Rs 160 premium that is **1.25% round trip — five times the
+modelled constant**, and on its own larger than any edge this project has ever
+measured. The same Rs 2 on a Rs 12 wing is 16.7%.
+
+Three details, each there because the feed needs it:
+
+- **`walk()` instead of a percentage.** A fraction cannot express "the best
+  offer shows 40 of the 75 you need". One NIFTY lot is 75 units; if the touch
+  is thinner than that, a market order fills the rest higher up. `walk()`
+  computes the real average fill, and says so plainly when the visible book
+  cannot fill the order at all rather than inventing a price for the remainder.
+- **The crossed-book self-correction.** The installed `SmartApi` SDK assigns
+  `best_5_buy_data` from its own parser's *sell* list and vice versa. Rather
+  than hard-code a fix to someone else's bug — which inverts silently the day
+  they fix it — the parser checks the one invariant a real market cannot
+  violate: **a book cannot be crossed.** Self-correcting in both directions.
+- **Paise versus rupees.** The binary feed reports integers in paise, the REST
+  quote reports rupees. The scale is *derived* by comparing against the LTP,
+  not assumed; without a reference price it says so instead of guessing.
+
+A missing book returns the assumed constant flagged `measured=False`, never a
+tight one — the same rule as an agent's failed LLM call becoming `CAUTION`
+rather than a silent `PROCEED`.
+
+**Time of day.** NSE's own microstructure research (Competitive Paper 128) puts
+spreads **widest at the open and close and narrowest between roughly 11:00 and
+14:00**. The scorer rewards opening-range breakouts, so it recommends trading
+in the single most expensive window of the day and charged a flat cost for it.
+`SPREAD_SHAPE_BY_HOUR` encodes that shape and is **labelled a prior, not a
+measurement**, with `calibrate_shape_from_fills()` to replace it from your own
+fills. It is applied only where nothing was measured — a measured book already
+*is* the book at that hour, so multiplying it by the prior would charge the
+same effect twice.
+
+## 2. The significance test was wrong, and the project's headline finding did not survive it
+
+This is the one that changes what you believe.
+
+`validation.py` measured a 24-bar forward return at **every** bar, so
+consecutive observations shared 23 of their 24 bars of path — one observation
+reported twenty-four times with a small perturbation. It then divided by
+`std/sqrt(n)`, the standard error of a mean of *independent* draws.
+
+Re-running the project's own flagship experiment through the corrected
+statistics, on the same data:
+
+```
+BANKNIFTY  fade score<=9 / >=90, 24-bar hold, OUT-OF-SAMPLE
+  n=455  mean +0.1117%  win 56.5%
+    i.i.d. t                 +3.90   <- what was reported and written up
+    HAC-corrected t          +1.83   <- below the significance bar
+    effective sample             19   <- not 455
+    non-overlapping median t +0.86   <- and the subsamples disagree on sign
+    block bootstrap          p=0.056  <- does not reject a zero mean
+```
+
+**There was never a statistically significant edge there.** The in-sample table
+shows the same pattern everywhere: every `t_iid` above 2 collapses below it
+once the overlap is accounted for.
+
+How bad is the naive statistic? Measured, not argued — on simulated random
+walks containing **no effect at all**, with a persistent trend-following score
+of the kind `scoring.py` produces, it declares significance **53% of the
+time**. A correct test says 5%. It was finding an edge in noise more often than
+not. (`tests/test_overlap_correction.py` asserts this.)
+
+Three views are now reported, because the conventional fix is not sufficient
+on its own:
+
+| test | false positives on pure noise | power vs a real drift |
+|---|---|---|
+| naive i.i.d. t | **53%** | 100% |
+| HAC (Newey-West) | 13-20% | 100% |
+| block bootstrap | 12-20% | 100% |
+| non-overlapping median t | **0-7%** | 100% |
+
+The conservatism costs nothing detectable, so `validate_rule` now requires the
+overlap-free tests to agree before it will call anything tradeable — a fifth
+check alongside the original four. It is judged only where the evidence exists:
+absence of corroboration is not disconfirmation.
+
+`research_fade_test.py` had its own hand-rolled copy of the naive statistic and
+now delegates to the module, so the error cannot be reintroduced in one place
+while the fix sits unused in the other.
+
+## 3. Nothing here had ever measured realised volatility
+
+`options_math.py` computes implied volatility and compares it to India VIX.
+That answers "dear or cheap *relative to other options*". It cannot answer the
+question that decides whether to **buy or sell** premium: is the market
+charging more for movement than the movement that actually happens?
+
+**`intraday_advisor/volatility.py`** — Parkinson, Garman-Klass,
+Rogers-Satchell, Yang-Zhang and close-to-close, plus the variance risk premium.
+This is the one genuinely **orthogonal** addition: realised volatility is also
+computed from price, but comparing it to *implied* brings in information from
+outside the price series entirely — what other participants will pay.
+
+Measured (`research_variance_premium.py`, re-runnable):
+
+```
+                     NIFTY    BANKNIFTY
+daily realised       12.3%      13.8%     (Yang-Zhang, last 30 sessions)
+India VIX           ~15.9%     ~15.9%
+premium              +3.6       +2.1      volatility points, TO THE SELLER
+```
+
+**Every option in this ledger was bought into a structural headwind.** That is
+the cleanest explanation yet for "direction was RIGHT and the trade still
+lost" — and `trading-strategy-framework` already recorded the symptom without
+the cause: *"Puts were the dear side on both and I was buying them."*
+
+Two traps this surfaces, both found by measuring rather than assuming:
+
+- **Annualise in trading time, not calendar time.** `options_math` prices with
+  `days/365`. Realised volatility accrues only while the market is open, and
+  252 trading days span one calendar year, so the bar count is built on 252
+  (5-minute bars: 75 a day, 18,900 a year). Using 365 overstates realised
+  volatility by ~20% and makes every option look cheap.
+- **The intraday figure overstates the premium.** A session-aware 5-minute
+  estimate drops overnight gaps; India VIX is a 30-day calendar measure that
+  includes them. Comparing those two gave +8.3 and +6.0 points — more than
+  double the honest +3.6 and +2.1. The daily numbers also reproduce the
+  textbook result: Parkinson and Garman-Klass read ~4 points lower than
+  Yang-Zhang on daily bars, because neither formula contains the overnight
+  jump.
+
+**And it still does not clear costs.** The premium over a 6-day hold is worth
+**0.46% (NIFTY) and 0.27% (BANKNIFTY)** of the underlying, against the ~1.25%
+round trip `microstructure.py` measures on a one-lot option. The favoured side
+of the trade loses too, at this size — which matches the published backtest
+concluding the NIFTY variance premium cannot be captured by a retail trader
+under current microstructure.
+
+So the premium is an argument about which **structure** to prefer — sell inside
+defined risk rather than buy — not a trade signal. `variance_risk_premium()`
+therefore **refuses to call the premium an opportunity** without a measured
+round-trip cost, and when it does clear, it says "a candidate to test, not a
+trade to place" and insists on defined risk, because a positive variance
+premium is payment for bearing crash risk: small wins often, large losses
+rarely, and a win rate that tells you almost nothing.
+
+## What is deliberately NOT scored
+
+Depth imbalance and the variance premium are both computed and both **kept out
+of the scorer**, reported as evidence instead. Adding an unvalidated component
+to a scorer already measured to have no edge is precisely the mistake that
+produced 32 collinear components in the first place. `validate_rule` is the
+gate either would have to pass.
+
+## Also fixed while in here
+
+`nse_option_chain.py` used `logger.debug` inside the `except` blocks of
+`_volatility_read` and `_pin_read` while **no `logger` existed in the module**.
+A `NameError` raised inside an exception handler replaces the exception it was
+handling and escapes, so the two functions whose docstrings promised "never
+raises" were the two that could — but only once something had already gone
+wrong, which is why it went unnoticed.
+
+## The standing conclusion is unchanged, and now better supported
+
+**No rule yet discovered in this project clears its own transaction costs.**
+What changed is that the one result which appeared to be an exception has been
+withdrawn on its own evidence, and the cost side is now measured rather than
+assumed. The app remains a well-instrumented measuring device with no validated
+edge in it — which is a real and useful thing to own, provided nobody mistakes
+it for a money machine.
+
+**639 tests.**

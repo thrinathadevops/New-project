@@ -10,11 +10,21 @@ if Angel One credentials are not configured.
 """
 from __future__ import annotations
 
+import logging
 import os
 import math
 import requests
 import numpy as np
 import pandas as pd
+
+# `_volatility_read` and `_pin_read` both promise never to raise, and both
+# called `logger.debug` inside their own `except` blocks while no `logger`
+# existed in this module. A NameError raised inside an exception handler
+# replaces the exception it was handling and escapes the function, so the two
+# functions documented as "never raises" were the two that could -- but only
+# on the path where something had already gone wrong, which is why it was
+# never noticed.
+logger = logging.getLogger(__name__)
 
 INSTRUMENT_MASTER_URL = (
     "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
@@ -251,15 +261,28 @@ def _angel_option_filter(instruments: pd.DataFrame, index: str, strikes: list[in
 
 
 def _fetch_market_data_angel(tokens: list[str], smart_api) -> dict[str, dict]:
-    """Fetch LTP **and open interest** via Angel One getMarketData (FULL mode).
+    """Fetch LTP, open interest **and the bid/ask book** via getMarketData FULL.
 
-    FULL mode already returns ``opnInterest`` per token — the previous version
-    only kept ``ltp`` and hard-coded OI to 0, which broke PCR/max-pain/walls and
-    the scanner's liquidity ranking on live data. Returns
-    ``{token: {"ltp": float, "oi": float}}``. Batches in 50s (the endpoint cap).
+    FULL mode returns ``opnInterest`` per token — the first version of this
+    function only kept ``ltp`` and hard-coded OI to 0, which broke
+    PCR/max-pain/walls and the scanner's liquidity ranking on live data.
+
+    FULL mode *also* returns five levels of bid and ask depth per contract, and
+    that was being discarded on every single refresh. Meanwhile
+    ``ledger/costs.py`` modelled the bid-ask spread as a flat 0.25% constant
+    for every contract — the one number that decides whether any trade clears
+    its costs, assumed rather than measured, while the data needed to measure
+    it arrived and was thrown away. See ``microstructure.py``.
+
+    Returns ``{token: {"ltp", "oi", "bid", "ask", "bid_qty", "ask_qty",
+    "half_spread_pct", "book_notes"}}``. The spread keys are ``None`` where the
+    feed gave no two-sided quote, never 0 — an unmeasurable book must not read
+    as a free one. Batches in 50s (the endpoint cap).
     """
     if not smart_api or not tokens:
         return {}
+    from intraday_advisor.microstructure import parse_book
+
     out: dict[str, dict] = {}
     try:
         for start in range(0, len(tokens), 50):
@@ -269,10 +292,29 @@ def _fetch_market_data_angel(tokens: list[str], smart_api) -> dict[str, dict]:
                 continue
             for item in resp.get("data", {}).get("fetched", []):
                 token = str(item.get("symbolToken", ""))
-                out[token] = {
-                    "ltp": float(item.get("ltp", 0) or 0),
+                ltp = float(item.get("ltp", 0) or 0)
+                entry = {
+                    "ltp": ltp,
                     "oi": float(item.get("opnInterest", item.get("openInterest", 0)) or 0),
+                    "bid": None, "ask": None,
+                    "bid_qty": 0.0, "ask_qty": 0.0,
+                    "half_spread_pct": None, "book_notes": [],
                 }
+                # The book is a bonus, never a requirement: a feed that stops
+                # sending depth must not take the chain down with it.
+                try:
+                    book = parse_book(item, symbol=token, reference_price=ltp)
+                    if book.is_usable:
+                        entry.update({
+                            "bid": book.best_bid, "ask": book.best_ask,
+                            "bid_qty": book.touch_quantity[0],
+                            "ask_qty": book.touch_quantity[1],
+                            "half_spread_pct": book.half_spread_pct,
+                        })
+                    entry["book_notes"] = list(book.notes)
+                except Exception as exc:  # noqa: BLE001
+                    entry["book_notes"] = [f"depth unreadable: {exc}"]
+                out[token] = entry
         return out
     except Exception:
         return {}
@@ -498,6 +540,17 @@ def suggest_option_trade(symbol: str, spot: float = 0.0,
                             "pe_oi":    pe_md.get("oi", 0),
                             "ce_chg_oi": 0,
                             "pe_chg_oi": 0,
+                            # The measured cost of entry, per contract. OI says
+                            # a strike is DEFENDED; the spread says whether you
+                            # can afford to enter it. Different questions.
+                            "ce_bid":   ce_md.get("bid"),
+                            "ce_ask":   ce_md.get("ask"),
+                            "pe_bid":   pe_md.get("bid"),
+                            "pe_ask":   pe_md.get("ask"),
+                            "ce_ask_qty": ce_md.get("ask_qty", 0),
+                            "pe_ask_qty": pe_md.get("ask_qty", 0),
+                            "ce_half_spread_pct": ce_md.get("half_spread_pct"),
+                            "pe_half_spread_pct": pe_md.get("half_spread_pct"),
                         })
                     df_oi = pd.DataFrame(rows)
                     has_oi = (sum(r["ce_oi"] + r["pe_oi"] for r in rows) > 0)

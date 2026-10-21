@@ -73,6 +73,13 @@ class Candidate:
     breakeven: float = 0.0
     cost_drag: float = 0.0
     risk_band: str = ""
+    # The cost of entry, measured from the book rather than assumed. ``None``
+    # where the feed gave no two-sided quote -- which is itself information
+    # about the contract, and must never be shown as a tight spread.
+    bid: float | None = None
+    ask: float | None = None
+    spread_pct: float | None = None          # round trip, % of premium
+    spread_measured: bool = False
     notes: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -168,10 +175,30 @@ def build_candidates(
             target = round(premium * (1 + target_pct), 2)
             stop = round(premium * (1 - stop_pct), 2)
 
+            # ---- the measured spread, where the feed gave us one ---------- #
+            #
+            # Every contract used to be priced with the same assumed 0.25%
+            # half-spread. That is defensible for an ATM weekly and badly wrong
+            # for a wing: a Rs 2 spread is 1.25% of a Rs 160 premium and 16.7%
+            # of a Rs 12 one. Ranking contracts by a cost model that cannot
+            # tell them apart ranks them by everything except the thing that
+            # decides whether they can repay their own entry.
+            #
+            # Where the book is missing the assumed constant still applies and
+            # `spread_measured` is False, so an unquoted contract is never
+            # flattered into looking cheap.
+            measured_half = row.get(f"{option_type.lower()}_half_spread_pct")
+            contract_costs = costs
+            spread_measured = False
+            if measured_half is not None and float(measured_half) > 0:
+                base = costs or OptionsCostModel()
+                contract_costs = base.with_measured_spread(float(measured_half))
+                spread_measured = True
+
             plan = plan_position(
                 available_capital=available_capital,
                 entry_premium=premium, stop_premium=stop, target_premium=target,
-                lot_size=lot_size, costs=costs,
+                lot_size=lot_size, costs=contract_costs,
                 max_capital_fraction=max_capital_fraction,
             )
 
@@ -222,6 +249,43 @@ def build_candidates(
                 elif share < 0.01:
                     score -= 5
                     notes.append("Thin open interest — wider spreads")
+
+            # ---- the spread, measured rather than inferred from OI -------- #
+            #
+            # The block above uses open interest as a PROXY for the spread
+            # ("thin open interest — wider spreads"). Where the book is
+            # actually quoted there is no need to proxy it, and the measurement
+            # outranks the proxy: a strike can carry heavy OI and still be
+            # quoted two rupees wide.
+            if spread_measured:
+                round_trip = float(measured_half) * 2
+                if round_trip >= 0.05:
+                    score -= 30
+                    notes.append(
+                        f"Spread is {round_trip * 100:.1f}% of the premium "
+                        f"round trip — measured, and larger than the move most "
+                        f"targets ask for"
+                    )
+                elif round_trip >= 0.02:
+                    score -= 15
+                    notes.append(
+                        f"Wide book: {round_trip * 100:.1f}% round trip in "
+                        f"spread alone (measured)"
+                    )
+                elif round_trip <= 0.004:
+                    score += 8
+                    notes.append(
+                        f"Tight book: {round_trip * 100:.2f}% round trip "
+                        f"(measured, not assumed)"
+                    )
+                # Can one lot even be filled at the quoted offer?
+                ask_qty = float(row.get(f"{option_type.lower()}_ask_qty", 0) or 0)
+                if ask_qty and lot_size and ask_qty < lot_size:
+                    score -= 10
+                    notes.append(
+                        f"Only {ask_qty:,.0f} offered at the touch against a "
+                        f"{lot_size} lot — you would walk the book"
+                    )
 
             # ---- the wall you would have to trade THROUGH ---------------- #
             #
@@ -280,6 +344,11 @@ def build_candidates(
                 reward_amount=plan.reward_amount,
                 net_rr=plan.net_rr, breakeven=plan.breakeven,
                 cost_drag=plan.cost_drag, risk_band=plan.risk_band,
+                bid=row.get(f"{option_type.lower()}_bid"),
+                ask=row.get(f"{option_type.lower()}_ask"),
+                spread_pct=(round(float(measured_half) * 200, 3)
+                            if spread_measured else None),
+                spread_measured=spread_measured,
                 notes=notes, warnings=plan.warnings,
             ))
 

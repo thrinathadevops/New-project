@@ -23,8 +23,24 @@ def test_market_data_parses_ltp_and_oi():
         {"symbolToken": "222", "ltp": 100, "opnInterest": 5000},
     ])
     md = _fetch_market_data_angel(["111", "222"], api)
-    assert md["111"] == {"ltp": 50.5, "oi": 12000.0}
+    # Asserting the fields this test is about, rather than exact dict equality:
+    # the parser also returns the bid/ask book now, and a test that breaks
+    # whenever a field is ADDED is testing the signature, not the behaviour.
+    assert md["111"]["ltp"] == 50.5
+    assert md["111"]["oi"] == 12000.0
     assert md["222"]["oi"] == 5000.0
+
+
+def test_a_payload_without_depth_reports_no_spread_rather_than_a_free_one():
+    """These payloads carry no book at all, which is the pre-existing shape.
+    The spread keys must come back None -- a 0 would read as a free entry on
+    the one number that decides whether a trade clears its costs."""
+    api = _StubAPI([{"symbolToken": "111", "ltp": 50.5, "opnInterest": 12000}])
+    md = _fetch_market_data_angel(["111"], api)
+
+    assert md["111"]["half_spread_pct"] is None
+    assert md["111"]["bid"] is None and md["111"]["ask"] is None
+    assert md["111"]["ask_qty"] == 0.0
 
 
 def test_market_data_batches_in_50s():

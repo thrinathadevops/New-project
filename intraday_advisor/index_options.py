@@ -96,6 +96,18 @@ class IndexOptionSignal:
     #: Set when the call wall, put wall and max pain sit on one strike -- both
     #: sides of the chain defending the same level.
     pin: dict = field(default_factory=dict)
+    #: Implied volatility against **realised** volatility -- the variance risk
+    #: premium. ``volatility`` above answers "dear or cheap compared to other
+    #: options"; this answers the question that decides whether to buy or sell
+    #: premium at all: is the market charging more for movement than the
+    #: movement that actually happens? Nothing in this project computed
+    #: realised volatility before, which is how six sessions were spent on the
+    #: buying side of a premium that is usually positive.
+    #: See intraday_advisor.volatility.
+    variance_premium: dict = field(default_factory=dict)
+    #: Realised volatility over several lookbacks, so "high volatility" is a
+    #: comparison rather than an adjective.
+    realized_volatility: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -224,6 +236,56 @@ def analyze_index_option(
     if pin.get("is_pin") and pin.get("note"):
         reasons.append(pin["note"])
 
+    # --- 2b. implied against REALISED: which side of the premium are we on? --
+    #
+    # `volatility` above compares this chain's IV to other options and to India
+    # VIX. That cannot say whether the price of movement is too high, only
+    # whether it is higher here than there. The comparison that answers it is
+    # against the movement that actually occurred, and it needs the candle
+    # frame -- which is why it lives here, where both are in scope, rather than
+    # in the chain builder.
+    #
+    # Deliberately NOT scored. It is reported as a reason and as structured
+    # evidence, because scoring an unvalidated input into a scorer already
+    # measured to have no edge is the mistake this project spent six sessions
+    # diagnosing. `validation.validate_rule` is the gate it would have to pass.
+    variance_premium: dict = {}
+    realized_read: dict = {}
+    if candles is not None and not candles.empty:
+        try:
+            from intraday_advisor.volatility import (
+                realized_volatility, variance_risk_premium, volatility_cone,
+            )
+            realized = realized_volatility(
+                candles, method="garman_klass", bar_size=interval)
+            realized_read = volatility_cone(candles, bar_size=interval)
+            # options_math stores these already multiplied by 100, so they are
+            # percentages and need no conversion -- checked rather than
+            # assumed, because a factor of 100 here would invert every verdict.
+            # Same preference order the module uses for its own VIX note.
+            atm_iv = None
+            for key in ("atm_pe_iv", "atm_ce_iv", "mean_pe_iv", "mean_ce_iv"):
+                if volatility.get(key) is not None:
+                    atm_iv = volatility[key]
+                    break
+            premium = variance_risk_premium(
+                atm_iv, realized,
+                days_to_expiry=volatility.get("days_to_expiry"),
+            )
+            variance_premium = premium.as_dict()
+            if premium.premium_points is not None:
+                reasons.append(premium.reasons[0])
+                if premium.side_being_paid == "seller":
+                    warnings.append(
+                        f"You would be BUYING volatility that is priced "
+                        f"{premium.premium_points:+.1f} point(s) above what "
+                        f"this index has actually been delivering. That is the "
+                        f"posture every losing option trade in this ledger was "
+                        f"in."
+                    )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Variance premium unavailable: {exc}")
+
     # --- 3 & 4. direction + score, both from the ONE scoring engine ---
     # Previously this block ran its own confluence logic and its own confidence
     # arithmetic, making it a fourth scorer nothing could trace or calibrate.
@@ -282,6 +344,8 @@ def analyze_index_option(
         strike=strike,
         option_type=option_type,
         volatility=volatility,
+        variance_premium=variance_premium,
+        realized_volatility=realized_read,
         pin=pin,
         entry_premium=entry,
         target_premium=target,

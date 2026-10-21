@@ -22,6 +22,7 @@ from intraday_advisor.data import fetch_yahoo_ohlcv
 from intraday_advisor.indicators import add_indicators
 from intraday_advisor.scoring import ScoreWeights, score_signal
 from intraday_advisor.strategy import apply_ema_swing_breakout_strategy
+from intraday_advisor.validation import evaluate_rule, validate_rule
 
 #: Round-trip cost as a fraction of the INDEX move, for each instrument.
 #: An option at delta ~0.5 costing 1.1% of a premium that is ~0.75% of spot
@@ -64,19 +65,54 @@ def build(ticker: str, period: str = "58d", interval: str = "5m") -> pd.DataFram
 
 
 def evaluate(chunk: pd.DataFrame, horizon: int, low: int, high: int) -> dict:
-    """Fade the extremes: short the top band, buy the bottom band."""
+    """Fade the extremes: short the top band, buy the bottom band.
+
+    **Rewritten 2026-10-21 and this is the point of the rewrite.** The original
+    version computed its own t-statistic as ``mean / (std / sqrt(n))`` -- the
+    standard error of a mean of *independent* draws, applied to 24-bar forward
+    returns sampled at every bar, where neighbouring observations share 23 of
+    their 24 bars. It reported t=+3.87 out-of-sample and this project wrote
+    that up as a real, statistically significant edge.
+
+    It was not. Re-run through ``validation.evaluate_rule``, which corrects for
+    the overlap, the same data gives:
+
+        BANKNIFTY out-of-sample   n=455   mean +0.1117%
+          i.i.d. t              +3.90      <- what this script used to print
+          HAC-corrected t       +1.83      <- below the significance bar
+          effective sample          19      <- not 455
+          non-overlapping t     +0.86      <- and the subsamples disagree on sign
+          block bootstrap     p=0.056      <- does not reject a zero mean
+
+    A simulation in ``tests/test_overlap_correction.py`` shows why: on random
+    walks containing no effect at all, that naive statistic declares
+    significance about **53%** of the time.
+
+    This function now delegates, so the error cannot be reintroduced here
+    while the fix sits unused in the module next door.
+    """
     column = f"fwd{horizon}"
-    longs = chunk[chunk.score <= low][column].dropna()         # fade bearish
-    shorts = chunk[chunk.score >= high][column].dropna()       # fade bullish
+    longs = chunk[chunk.score <= low][column].dropna()
+    shorts = chunk[chunk.score >= high][column].dropna()
     if len(longs) < 30 or len(shorts) < 30:
         return {}
-    # A faded short earns the NEGATIVE of the forward return.
-    pnl = pd.concat([longs, -shorts])
+
+    study = evaluate_rule(chunk, horizon=horizon, buy_below=low,
+                          sell_above=high, fade=True)
+    if study.observations < 30:
+        return {}
+    non_overlap = study.non_overlapping or {}
     return {
-        "n": len(pnl),
-        "mean_pct": pnl.mean(),
-        "win_rate": (pnl > 0).mean() * 100,
-        "t": pnl.mean() / (pnl.std(ddof=1) / np.sqrt(len(pnl))) if len(pnl) > 1 else 0.0,
+        "n": study.observations,
+        "mean_pct": study.mean_pct,
+        "win_rate": study.win_rate,
+        "t": study.t_stat,                 # HAC-corrected
+        "t_iid": study.t_stat_iid,         # the inflated figure, for contrast
+        "effective_n": study.effective_observations,
+        "t_nonoverlap": non_overlap.get("median_t"),
+        "signs_agree": non_overlap.get("all_offsets_agree_on_sign"),
+        "bootstrap_p": (study.bootstrap or {}).get("p_value"),
+        "study": study,
     }
 
 
@@ -91,16 +127,20 @@ def run(ticker: str, label: str):
     print("=" * 76)
 
     print(f"\nIN-SAMPLE: fade the extremes (buy score<=low, short score>=high)")
-    print(f"{'rule':>22} {'n':>6} {'mean%':>9} {'win%':>7} {'t':>7}")
+    print(f"{'rule':>22} {'n':>6} {'mean%':>9} {'win%':>7} "
+          f"{'t_iid':>7} {'t_HAC':>7} {'eff_n':>6}")
     best = None
+    searched = 0
     for low, high in ((9, 90), (14, 85), (24, 75), (39, 60)):
         for horizon in (6, 12, 24):
             stats = evaluate(train, horizon, low, high)
             if not stats:
                 continue
+            searched += 1
             tag = f"<={low} / >={high} @{horizon}b"
             print(f"{tag:>22} {stats['n']:6,} {stats['mean_pct']:9.4f} "
-                  f"{stats['win_rate']:6.1f}% {stats['t']:7.2f}")
+                  f"{stats['win_rate']:6.1f}% {stats['t_iid']:7.2f} "
+                  f"{stats['t']:7.2f} {stats['effective_n']:6.0f}")
             if best is None or stats["t"] > best[1]["t"]:
                 best = ((low, high, horizon), stats)
 
@@ -117,7 +157,16 @@ def run(ticker: str, label: str):
         print("  too few test observations.")
         return
     print(f"  n={out_stats['n']:,}  mean {out_stats['mean_pct']:+.4f}%  "
-          f"win {out_stats['win_rate']:.1f}%  t={out_stats['t']:+.2f}")
+          f"win {out_stats['win_rate']:.1f}%")
+    print(f"\n  Is it significant? Four views, because one is not enough:")
+    print(f"    i.i.d. t                 {out_stats['t_iid']:+.2f}   "
+          f"<- inflated: treats {out_stats['n']} overlapping observations as "
+          f"independent")
+    print(f"    HAC-corrected t          {out_stats['t']:+.2f}   "
+          f"(effective sample {out_stats['effective_n']:.0f})")
+    print(f"    non-overlapping median t {out_stats['t_nonoverlap']:+.2f}   "
+          f"(all offsets agree on sign: {out_stats['signs_agree']})")
+    print(f"    block bootstrap          p={out_stats['bootstrap_p']:.3f}")
 
     print(f"\n  Does it survive costs, per round trip?")
     for instrument, cost in COST_INDEX_PCT.items():
@@ -125,6 +174,17 @@ def run(ticker: str, label: str):
         verdict = "PROFITABLE" if net > 0 else "loses to costs"
         print(f"    {instrument:28} edge {out_stats['mean_pct']:+.4f}% "
               f"- cost {cost:.2f}% = {net:+.4f}%  {verdict}")
+
+    # The gate, with the number of rules actually searched declared. Reporting
+    # the best of 12 needs a higher bar than testing one, and the gate knows it.
+    verdict = validate_rule(
+        in_stats["study"], out_stats["study"],
+        instrument="equity", hypotheses_tested=max(1, searched),
+    )
+    print(f"\n  GATE (validation.validate_rule): "
+          f"tradeable = {verdict.tradeable}")
+    for reason in verdict.reasons:
+        print(f"    - {reason}")
 
 
 if __name__ == "__main__":
