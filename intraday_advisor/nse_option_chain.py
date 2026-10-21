@@ -302,6 +302,88 @@ def _build_synthetic_oi(strikes: list[int], spot: float) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# PCR thresholds. Above/below these the chain is taken to have a directional
+# opinion; between them it does not, and saying so is the honest answer.
+PCR_CALL_THRESHOLD = 1.3
+PCR_PUT_THRESHOLD = 0.75
+
+
+def decide_chain_bias(
+    pcr: float, spot: float, max_pain: float, step: float
+) -> tuple[str, list[str]]:
+    """The option chain's directional read: ``CALL`` / ``PUT`` / ``NEUTRAL``.
+
+    Pulled out of :func:`suggest_option_trade` so it can be tested on its own.
+    It could not be before, which is how the following survived unnoticed.
+
+    **Only PCR sets the direction.** Max pain reports its distance and nothing
+    more. The previous rule was ``if bias == "NEUTRAL": bias = "CALL"`` whenever
+    spot sat below max pain, which was wrong three ways:
+
+    1. It invented a directional opinion the chain did not have. PCR is the
+       metric designed to give one; when PCR is mid-range, NEUTRAL is the
+       answer.
+    2. Max pain is an **expiry**-settlement concept -- the strike where writers
+       keep the most premium. Treating it as an intraday magnet days before
+       expiry is not a supported inference.
+    3. It was **asymmetric**. Below max pain *created* a CALL bias; above max
+       pain merely demoted CALL to NEUTRAL and never created a PUT. That gave
+       the chain a standing bullish tilt, so in a falling market it
+       manufactured a CALL that vetoed every well-evidenced PUT.
+
+    Seen live on 2026-10-21: NIFTY PCR 0.95 and BANKNIFTY PCR 0.90 -- both
+    neutral -- were promoted to CALL purely on max-pain distance. That
+    collided with a price read of 0/100 built from fourteen independent
+    bearish indicators, and the system stood aside from a trade it had strong
+    evidence for.
+
+    Max-pain distance still reaches the score as the weighted, symmetric
+    ``max_pain_pull`` component in :mod:`intraday_advisor.scoring`, where it
+    can be measured against outcomes and re-fitted -- or zeroed -- instead of
+    silently overriding the direction.
+    """
+    reasons: list[str] = []
+    bias = "NEUTRAL"
+
+    if pcr > PCR_CALL_THRESHOLD:
+        bias = "CALL"
+        reasons.append(
+            f"📊 PCR = {pcr} > {PCR_CALL_THRESHOLD} → More PUT writers than "
+            f"CALL writers → Bullish bias (contrarian interpretation)"
+        )
+    elif pcr < PCR_PUT_THRESHOLD:
+        bias = "PUT"
+        reasons.append(
+            f"📊 PCR = {pcr} < {PCR_PUT_THRESHOLD} → More CALL writers → "
+            f"Bearish bias (contrarian interpretation)"
+        )
+    else:
+        reasons.append(
+            f"📊 PCR = {pcr} between {PCR_PUT_THRESHOLD}–{PCR_CALL_THRESHOLD} "
+            f"→ Neutral zone — the chain has no directional opinion"
+        )
+
+    # Reported, never acted on. See the docstring.
+    if spot > max_pain + step:
+        reasons.append(
+            f"⚠️ Spot ₹{spot:,.0f} is {spot - max_pain:,.0f} pts above Max Pain "
+            f"₹{max_pain:,.0f} — writers would gain from a pullback "
+            f"(scored, not a direction call)"
+        )
+    elif spot < max_pain - step:
+        reasons.append(
+            f"ℹ️ Spot ₹{spot:,.0f} is {max_pain - spot:,.0f} pts below Max Pain "
+            f"₹{max_pain:,.0f} — writers would gain from a drift up "
+            f"(scored, not a direction call)"
+        )
+    else:
+        reasons.append(
+            f"📍 Spot ₹{spot:,.0f} is near Max Pain ₹{max_pain:,.0f} "
+            f"— normal range"
+        )
+    return bias, reasons
+
+
 def suggest_option_trade(symbol: str, spot: float = 0.0,
                          expiry: str | None = None) -> dict:
     """
@@ -425,29 +507,9 @@ def suggest_option_trade(symbol: str, spot: float = 0.0,
     atm_ce_oi  = int(atm_row["ce_oi"].sum())    if not atm_row.empty else 0
     atm_pe_oi  = int(atm_row["pe_oi"].sum())    if not atm_row.empty else 0
 
-    # ── 5. Direction logic ─────────────────────────────────────────────────
-    reasons = [f"Data source: **{data_source}**"]
-    bias    = "NEUTRAL"
-
-    # PCR signal
-    if pcr > 1.3:
-        bias = "CALL"
-        reasons.append(f"📊 PCR = {pcr} > 1.3 → More PUT writers than CALL writers → Bullish bias (contrarian interpretation)")
-    elif pcr < 0.75:
-        bias = "PUT"
-        reasons.append(f"📊 PCR = {pcr} < 0.75 → More CALL writers → Bearish bias (contrarian interpretation)")
-    else:
-        reasons.append(f"📊 PCR = {pcr} between 0.75–1.3 → Neutral zone")
-
-    # Max pain
-    if spot > max_pain + step:
-        reasons.append(f"⚠️ Spot ₹{spot:,.0f} is {spot-max_pain:,.0f} pts above Max Pain ₹{max_pain:,.0f} → Risk of pullback toward Max Pain")
-        if bias == "CALL": bias = "NEUTRAL"
-    elif spot < max_pain - step:
-        reasons.append(f"✅ Spot ₹{spot:,.0f} is {max_pain-spot:,.0f} pts below Max Pain ₹{max_pain:,.0f} → Market may push up toward Max Pain")
-        if bias == "NEUTRAL": bias = "CALL"
-    else:
-        reasons.append(f"📍 Spot ₹{spot:,.0f} is near Max Pain ₹{max_pain:,.0f} — normal range")
+    # ── 5. Direction logic ─────────────────────────────────────────
+    bias, bias_reasons = decide_chain_bias(pcr, spot, max_pain, step)
+    reasons = [f"Data source: **{data_source}**"] + bias_reasons
 
     # Walls
     reasons.append(f"🔴 Strongest CE (Call) wall = Resistance at ₹{max_ce_wall:,} — market struggles above this")

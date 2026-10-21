@@ -223,6 +223,7 @@ def analyze_index_option(
         spot=spot or None,
         ce_wall=float(chain.get("max_ce_wall", 0) or 0) or None,
         pe_wall=float(chain.get("max_pe_wall", 0) or 0) or None,
+        max_pain=float(chain.get("max_pain", 0) or 0) or None,
         warnings=warnings,
         weights=ScoreWeights.load(),
     )

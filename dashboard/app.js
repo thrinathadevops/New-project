@@ -395,7 +395,11 @@ function renderStocks(snapshot) {
         <td class="num ${r.change_pct > 0 ? 'pos' : r.change_pct < 0 ? 'neg' : ''}">
           ${r.change_pct > 0 ? '+' : ''}${r.change_pct.toFixed(2)}%</td>
         <td class="num"><b>${r.score}</b></td>
-        <td><span class="sig-pill sig-pill--${escapeHtml(r.signal)}">${escapeHtml(r.signal)}</span></td>
+        <td><span class="sig-pill sig-pill--${escapeHtml(r.signal)}">${escapeHtml(r.signal)}</span>${
+          r.side === 'SHORT'
+            ? '<span class="side-flag" title="Short plan: the stop is ABOVE '
+              + 'the entry and the target BELOW it. Needs MIS margin.">▼ SHORT</span>'
+            : ''}</td>
         <td class="num">${r.rsi ?? '—'}</td>
         <td class="num">${r.adx ?? '—'}</td>
         <td class="num">${r.atr_pct ?? '—'}</td>

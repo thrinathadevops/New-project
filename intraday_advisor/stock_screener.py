@@ -70,6 +70,8 @@ class StockRow:
     change_pct: float
     score: int
     signal: str                   # BUY / SELL / HOLD
+    #: LONG or SHORT -- which way the bracket below is oriented.
+    side: str = "LONG"
     # --- the read ---
     trend: str = ""
     above_vwap: bool = False
@@ -175,23 +177,50 @@ def screen_one(
     atr = float(last.get("ATR14") or 0)
 
     # --- plan: ATR stop, fixed reward:risk, sized to the risk budget -------
+    #
+    # The plan follows the SIGNAL'S DIRECTION. This was previously hardcoded as
+    # a long -- stop always below entry, target always above -- and emitted for
+    # every row including SELLs. On 2026-10-21, 29 of 30 ranked names were
+    # SELL in a falling market, so the screen was handing out a bracket that
+    # was inverted on almost every line: it labelled a price ABOVE a short
+    # entry as the "target" and one BELOW it as the "stop", which is precisely
+    # backwards, and made net R:R and breakeven meaningless for those rows.
+    #
+    # A short is not a long with a minus sign in the P&L: the stop sits above
+    # the entry, the target below, and breakeven is below the entry because the
+    # costs have to come out of a fall.
+    short = scored.signal_type == "SELL"
     entry = price
-    stop = max(0.01, entry - risk.atr_stop_multiplier * atr) if atr > 0 else 0.0
-    target = entry + risk.reward_risk_ratio * (entry - stop) if stop else 0.0
-    shares = (calculate_position_size(capital, entry, stop, risk_pct)
-              if stop and stop < entry else 0)
+    if atr > 0:
+        offset = risk.atr_stop_multiplier * atr
+        stop = (entry + offset) if short else max(0.01, entry - offset)
+        reward = risk.reward_risk_ratio * abs(entry - stop)
+        target = max(0.01, entry - reward) if short else entry + reward
+    else:
+        stop = target = 0.0
+
+    # Sizing cares about the DISTANCE to the stop, not which side it is on.
+    stop_distance = abs(entry - stop) if stop else 0.0
+    shares = (calculate_position_size(capital, entry, entry - stop_distance, risk_pct)
+              if stop_distance > 0 else 0)
 
     cost_rt = _equity_round_trip(entry, target or entry, shares, costs)
-    gross_risk = shares * (entry - stop) if shares else 0.0
-    gross_reward = shares * (target - entry) if shares else 0.0
+    gross_risk = shares * stop_distance if shares else 0.0
+    gross_reward = shares * abs(target - entry) if shares else 0.0
     # Costs land on both outcomes, so they widen the loss and shrink the win.
     net_risk = gross_risk + cost_rt
     net_reward = max(0.0, gross_reward - cost_rt)
     deployed = shares * entry
 
-    breakeven = entry + (cost_rt / shares) if shares else entry
+    # A long has to rise past its costs; a short has to fall past them.
+    breakeven = entry + (cost_rt / shares) * (-1 if short else 1) if shares else entry
 
     warnings: list[str] = []
+    if short:
+        warnings.append(
+            "SHORT plan: stop is ABOVE entry, target BELOW. Intraday shorting "
+            "needs MIS/margin and cannot be carried past square-off."
+        )
     if shares <= 0:
         warnings.append("Risk budget does not cover one share at this stop distance.")
     if deployed > capital:
@@ -219,6 +248,7 @@ def screen_one(
         atr_pct=round(atr / price * 100, 2) if price else None,
         volume_ratio=volume_ratio,
         entry=round(entry, 2), stop=round(stop, 2), target=round(target, 2),
+        side="SHORT" if short else "LONG",
         shares=shares, deployed=round(deployed, 2),
         risk_amount=round(net_risk, 2),
         risk_pct=round(net_risk / capital, 4) if capital else 0.0,

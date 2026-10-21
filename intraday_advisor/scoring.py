@@ -89,6 +89,11 @@ class ScoreWeights:
     chain_conflict: float = 20.0
     pcr_extreme: float = 5.0
     oi_wall: float = 5.0
+    # Max-pain distance. Deliberately SMALL: it used to override the chain's
+    # direction outright, and its intraday predictive value has never been
+    # measured here. As a named component the calibration can raise it if the
+    # ledger shows it earns more, or zero it if it does not.
+    max_pain_pull: float = 3.0
     # Flat penalty per analysis warning, so data problems visibly cost score.
     warning_penalty: float = 3.0
 
@@ -471,6 +476,7 @@ def score_option_signal(
     spot: float | None = None,
     ce_wall: float | None = None,
     pe_wall: float | None = None,
+    max_pain: float | None = None,
     warnings: list[str] | None = None,
     weights: ScoreWeights | None = None,
 ) -> OptionScore:
@@ -558,6 +564,24 @@ def score_option_signal(
             add("pcr_extreme", -w.pcr_extreme, f"PCR {pcr:.2f} argues against a PUT")
         elif pcr <= PCR_BEARISH and direction == "CALL":
             add("pcr_extreme", -w.pcr_extreme, f"PCR {pcr:.2f} argues against a CALL")
+
+    # --- Max-pain pull: a nudge on an already-decided direction ----------
+    #
+    # It runs AFTER the direction is settled and can only adjust the score, so
+    # it can no longer manufacture a CALL out of a neutral chain the way the
+    # old `if bias == "NEUTRAL": bias = "CALL"` in the chain builder did.
+    # Symmetric by construction: whatever it grants a CALL below max pain it
+    # grants a PUT above it, so the chain carries no standing bullish tilt.
+    if max_pain and max_pain > 0 and spot and spot > 0 and direction in ("CALL", "PUT"):
+        drift = (max_pain - spot) / spot          # >0 if max pain sits above
+        if abs(drift) >= 0.001:                   # inside 0.1% it is noise
+            supports = (drift > 0) if direction == "CALL" else (drift < 0)
+            magnitude = min(1.0, abs(drift) / 0.01)   # full weight at 1% away
+            points = w.max_pain_pull * magnitude * (1 if supports else -1)
+            add("max_pain_pull", points,
+                f"Max pain {max_pain:.0f} sits "
+                f"{'above' if drift > 0 else 'below'} spot "
+                f"({'with' if supports else 'against'} this {direction})")
 
     # --- OI walls: price running INTO a wall is resistance against you ---
     if spot and spot > 0:

@@ -1235,3 +1235,19 @@ td.cell-flash {
   td.cell-flash { animation-duration: 1ms; }
   .prem--live::after { animation: none; }
 }
+
+/* A short row's Stop column holds the HIGHER number and Target the lower one.
+   Without a marker that reads as a bug, so the row states its direction. */
+.side-flag {
+  display: inline-block;
+  margin-left: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+  cursor: help;
+}
