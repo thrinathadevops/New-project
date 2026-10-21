@@ -137,6 +137,19 @@
   <div class="grid-main">
 
     <div>
+      <!-- The measured answer to "should I buy anything", above everything
+           that might tempt you to. -->
+      <section class="verdict-banner" id="verdict-banner" hidden
+               aria-label="What the measured record says" role="status">
+        <div class="verdict-banner__mark" id="verdict-mark"></div>
+        <div class="verdict-banner__body">
+          <h2 class="verdict-banner__headline" id="verdict-headline"></h2>
+          <p class="verdict-banner__detail" id="verdict-detail"></p>
+          <p class="verdict-banner__change" id="verdict-change"></p>
+          <p class="verdict-banner__hours" id="verdict-hours"></p>
+        </div>
+      </section>
+
       <section class="signals" id="signals" aria-label="Current signals">
         <div class="card empty">Waiting for the first snapshot…</div>
       </section>

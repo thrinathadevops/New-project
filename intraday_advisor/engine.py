@@ -860,12 +860,121 @@ class Engine:
                 **stats,
                 "performance": performance,
                 "bands": bands.to_dict("records") if not bands.empty else [],
+                "advice": plain_verdict(performance, self.db_path),
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("Ledger panel failed: %s", exc)
             return {"error": str(exc), "total_signals": 0, "graded": 0,
                     "performance": {"trades": 0, "verdict": "Ledger unavailable."},
                     "bands": []}
+
+
+def plain_verdict(performance: dict, db_path) -> dict:
+    """The measured answer to "should I buy anything right now", in plain words.
+
+    Every number here was already computed and reachable only from a command
+    line. A dashboard that shows eight indicators, an option chain and a
+    confluence score, while burying "this system lost money on 96 of its last
+    108 trades" behind ``ledger_cli.py report``, is a dashboard that makes it
+    easier to trade than to find out whether trading is a good idea.
+
+    Written for somebody who has said they have no background in markets, so
+    the rates are restated as counts ("about one winner in every nine") and the
+    confidence interval as a range of losses rather than as a bound.
+    """
+    trades = int(performance.get("trades") or 0)
+    low = performance.get("expectancy_low")
+    high = performance.get("expectancy_high")
+    expectancy = performance.get("expectancy")
+    win_rate = performance.get("win_rate")
+
+    advice: dict = {
+        "trades": trades, "expectancy": expectancy, "win_rate": win_rate,
+        "hourly": [], "worst_hours": [],
+    }
+
+    # The hour breakdown, because it is the one pattern in this ledger strong
+    # enough to act on: measured 2026-10-21, zero wins in 67 trades after 13:00.
+    try:
+        from intraday_advisor.ledger.report import by_dimension
+
+        hourly = by_dimension("hour", db_path=db_path, min_trades=1)
+        if not hourly.empty:
+            rows = hourly.to_dict("records")
+            advice["hourly"] = rows
+            advice["worst_hours"] = sorted(
+                int(r["hour"]) for r in rows
+                if r.get("trades", 0) >= 10 and not (r.get("win_rate") or 0)
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Hourly breakdown unavailable: %s", exc)
+
+    if trades < 20:
+        advice.update({
+            "state": "UNMEASURED",
+            "headline": "No measured edge yet - treat every trade as an experiment.",
+            "detail": (
+                f"Only {trades} trade(s) have been graded. A win rate needs "
+                f"about 20 before it means anything, so nothing on this screen "
+                f"can yet tell you whether this system makes money."
+            ),
+            "what_would_change_it": (
+                "Run `python ledger_cli.py grade` after each close until there "
+                "are 20 or more graded trades."
+            ),
+            "tradeable": False,
+        })
+        return advice
+
+    if high is not None and high < 0:
+        wins = int(performance.get("wins") or 0)
+        one_in = round(1 / win_rate) if win_rate else 0
+        advice.update({
+            "state": "LOSING",
+            "headline": "Do not buy anything. This system has measured losses.",
+            "detail": (
+                f"Over {trades} completed trades it won {wins} and lost "
+                f"{trades - wins} - about one winner in every {one_in}. The "
+                f"average trade lost Rs {abs(expectancy):,.0f} per lot, and the "
+                f"entire statistical range (a loss of Rs {abs(high):,.0f} to "
+                f"Rs {abs(low):,.0f}) sits on the losing side. That is a "
+                f"measurement, not bad luck."
+            ),
+            "what_would_change_it": (
+                "The measured average has to move above zero. Until it does, "
+                "every contract on this screen is one this system has been "
+                "losing money on."
+            ),
+            "tradeable": False,
+        })
+        return advice
+
+    if low is not None and low > 0:
+        advice.update({
+            "state": "EDGE",
+            "headline": f"Measured edge: Rs {expectancy:,.0f} per lot on average.",
+            "detail": (
+                f"Over {trades} trades the entire statistical range is above "
+                f"zero. That is the only condition under which the rest of "
+                f"this screen is worth acting on."
+            ),
+            "what_would_change_it": "",
+            "tradeable": True,
+        })
+        return advice
+
+    advice.update({
+        "state": "INCONCLUSIVE",
+        "headline": "Too close to call - the measured result straddles zero.",
+        "detail": (
+            f"Over {trades} trades the average is Rs {expectancy:,.0f} per lot, "
+            f"but the range runs from Rs {low:,.0f} to Rs {high:,.0f}. It could "
+            f"be a small edge or a small loss; there is not enough evidence."
+        ),
+        "what_would_change_it": "More graded trades will narrow the range.",
+        "tradeable": False,
+    })
+    return advice
 
 
 def _safe(value: Any) -> float | None:

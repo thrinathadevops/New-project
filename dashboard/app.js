@@ -534,6 +534,47 @@ function candidatesTable(signal) {
     </details>`;
 }
 
+/** The measured record, stated plainly, above everything it should override.
+ *
+ *  This exists because the numbers were already computed and only reachable
+ *  from a command line. A screen that shows a confluence score, an option
+ *  chain and eight indicators, while hiding "96 of the last 108 trades lost
+ *  money" behind a CLI, makes trading easier than checking whether trading is
+ *  a good idea.
+ */
+function renderVerdict(snapshot) {
+  const banner = $('verdict-banner');
+  if (!banner) return;
+  const advice = ((snapshot.ledger || {}).advice) || {};
+  const state = advice.state;
+
+  if (!state) {
+    banner.hidden = true;
+    document.querySelector('.app').classList.remove('is-losing');
+    return;
+  }
+
+  banner.hidden = false;
+  banner.className = `verdict-banner verdict-banner--${state}`;
+  setText($('verdict-mark'),
+    { LOSING: '✖', UNMEASURED: '?', INCONCLUSIVE: '?', EDGE: '✓' }[state] || '');
+  setText($('verdict-headline'), advice.headline || '');
+  setText($('verdict-detail'), advice.detail || '');
+  setText($('verdict-change'), advice.what_would_change_it || '');
+
+  // The one pattern in this ledger strong enough to act on.
+  const hours = advice.worst_hours || [];
+  setText($('verdict-hours'), hours.length
+    ? `Measured so far: no winning trade at all in the ${
+        hours.map((h) => `${h}:00`).join(' or ')} hour(s). `
+      + `If you take nothing else from this screen, do not open a position then.`
+    : '');
+
+  // Dim the contracts when the record says losing. Still readable; no longer
+  // the brightest thing on the page asking to be clicked.
+  document.querySelector('.app').classList.toggle('is-losing', state === 'LOSING');
+}
+
 function renderTickBadge(snapshot) {
   const ticks = snapshot.ticks || {};
   const badge = $('tick-badge');
@@ -2344,6 +2385,9 @@ function applySnapshot(snapshot) {
   document.querySelector('.app').classList.remove('is-stale');
 
   renderHeader(snapshot);
+  // Before the signals, deliberately: it is the only panel here reporting what
+  // actually happened rather than what might.
+  renderVerdict(snapshot);
   renderSignals(snapshot);
   // Derived from the plans, so it refreshes every snapshot. syncControls is
   // latched to run once (it must not overwrite what the user is typing), and

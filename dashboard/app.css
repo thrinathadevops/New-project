@@ -1288,3 +1288,70 @@ td.cell-flash {
 }
 .iv-chip--dear { color: var(--warning); border-color: var(--warning); }
 .iv-chip--pin  { color: var(--critical); border-color: var(--critical); }
+
+/* =============================================== the measured verdict ==== */
+/* Deliberately the loudest thing on the page when the record says losing.
+   Everything else here is an opinion about the next hour; this is the only
+   panel reporting what actually happened to real money. */
+
+.verdict-banner {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-top: var(--gap);
+  padding: 16px 18px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+}
+.verdict-banner__mark {
+  flex: 0 0 auto;
+  width: 34px; height: 34px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  font-size: 19px; font-weight: 700;
+}
+.verdict-banner__body { min-width: 0; }
+.verdict-banner__headline {
+  margin: 0 0 5px;
+  font-size: 17px; font-weight: 650; line-height: 1.3;
+}
+.verdict-banner__detail,
+.verdict-banner__change,
+.verdict-banner__hours {
+  margin: 0; font-size: 13px; line-height: 1.55;
+  color: var(--text-secondary);
+}
+.verdict-banner__change { margin-top: 6px; color: var(--text-muted); }
+.verdict-banner__hours:not(:empty) { margin-top: 7px; font-weight: 600; }
+
+.verdict-banner--LOSING {
+  border-color: var(--critical);
+  background: var(--critical-wash);
+}
+.verdict-banner--LOSING .verdict-banner__headline { color: var(--critical); }
+.verdict-banner--LOSING .verdict-banner__mark {
+  background: var(--critical); color: var(--on-critical);
+}
+.verdict-banner--UNMEASURED,
+.verdict-banner--INCONCLUSIVE {
+  border-color: var(--warning); background: var(--warning-wash);
+}
+.verdict-banner--UNMEASURED .verdict-banner__headline,
+.verdict-banner--INCONCLUSIVE .verdict-banner__headline { color: var(--warning); }
+.verdict-banner--UNMEASURED .verdict-banner__mark,
+.verdict-banner--INCONCLUSIVE .verdict-banner__mark {
+  background: var(--warning); color: var(--ink-on-light, #0b0b0b);
+}
+.verdict-banner--EDGE {
+  border-color: var(--good); background: var(--good-wash);
+}
+.verdict-banner--EDGE .verdict-banner__headline { color: var(--good); }
+.verdict-banner--EDGE .verdict-banner__mark {
+  background: var(--good); color: var(--on-good);
+}
+
+/* When the record says losing, the contracts below it are dimmed: they are
+   still readable, and no longer the brightest thing competing for a click. */
+.app.is-losing .signals { opacity: 0.72; }
+.app.is-losing .signals:hover { opacity: 1; }
