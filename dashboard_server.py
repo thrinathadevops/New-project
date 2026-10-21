@@ -179,6 +179,45 @@ class Broadcaster:
                 if payload.get("events"):
                     self.request_refresh()
 
+    async def grade_when_due(self, every: float = 300.0) -> None:
+        """Grade the ledger by itself, because the manual step never happens.
+
+        The whole record -> grade -> report pipeline worked and 151 real signals
+        sat ungraded, because grading was a command somebody had to remember
+        after the close. When it finally ran it produced the most useful number
+        in the project. A measurement that depends on being remembered is one
+        that does not happen.
+
+        Runs on its own slow clock: grading reads a whole session's premium path
+        from the broker, so checking every five minutes is both ample and the
+        most this should ever ask of the API.
+        """
+        from intraday_advisor import auto_grade
+
+        while True:
+            try:
+                summary = await asyncio.to_thread(
+                    auto_grade.grade_due, self.engine.db_path
+                )
+                for entry in summary.get("graded", []):
+                    logger.info(
+                        "Auto-graded %s: %s signal(s) %s",
+                        entry["session"], entry["graded"], entry.get("outcomes") or "",
+                    )
+                    await self.broadcast({
+                        "type": "ack", "title": "Session graded",
+                        "message": (
+                            f"{entry['session']}: {entry['graded']} signal(s) "
+                            f"graded. The measured verdict has been updated."
+                        ),
+                    })
+                    # The verdict banner reads the ledger, so refresh it now
+                    # rather than at the next interval.
+                    self.request_refresh()
+            except Exception as exc:  # noqa: BLE001 - never take the desk down
+                logger.warning("Auto-grade pass failed: %s", exc)
+            await asyncio.sleep(every)
+
     async def run(self) -> None:
         while True:
             try:
@@ -425,6 +464,8 @@ async def main_async(args) -> None:
     async with serve(route, args.host, args.port, process_request=process_request):
         # Prices stream on their own clock, independent of the snapshot loop.
         tick_task = asyncio.create_task(broadcaster.stream_ticks())
+        # Grades itself after the close. See Broadcaster.grade_when_due.
+        grade_task = asyncio.create_task(broadcaster.grade_when_due())
         shown_host = "localhost" if args.host in ("0.0.0.0", "") else args.host
         logger.info("=" * 62)
         logger.info("  Options Desk ready:  http://%s:%s", shown_host, args.port)
@@ -437,6 +478,7 @@ async def main_async(args) -> None:
             await broadcaster.run()
         finally:
             tick_task.cancel()
+            grade_task.cancel()
 
 
 def main(argv=None) -> int:

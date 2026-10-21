@@ -861,12 +861,23 @@ class Engine:
                 "performance": performance,
                 "bands": bands.to_dict("records") if not bands.empty else [],
                 "advice": plain_verdict(performance, self.db_path),
+                "auto_grade": _auto_grade_note(self.db_path),
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("Ledger panel failed: %s", exc)
             return {"error": str(exc), "total_signals": 0, "graded": 0,
                     "performance": {"trades": 0, "verdict": "Ledger unavailable."},
                     "bands": []}
+
+
+def _auto_grade_note(db_path) -> dict:
+    """What automatic grading is waiting on. Never raises."""
+    try:
+        from intraday_advisor import auto_grade
+        return auto_grade.describe(db_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Auto-grade status unavailable: %s", exc)
+        return {"note": "", "pending_sessions": []}
 
 
 def plain_verdict(performance: dict, db_path) -> dict:
