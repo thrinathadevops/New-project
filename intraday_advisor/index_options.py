@@ -88,6 +88,14 @@ class IndexOptionSignal:
     #: Which expiry this plan is quoted against, and what else is available.
     expiry: str | None = None
     expiries: list = field(default_factory=list)
+    #: What the chain is charging for movement -- IV per side, the skew, and
+    #: the ATM pair. The first question an option buyer has to answer is "am I
+    #: overpaying", and before this there was nothing on the screen to answer
+    #: it from. See intraday_advisor.options_math.
+    volatility: dict = field(default_factory=dict)
+    #: Set when the call wall, put wall and max pain sit on one strike -- both
+    #: sides of the chain defending the same level.
+    pin: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         d = self.__dict__.copy()
@@ -203,10 +211,18 @@ def analyze_index_option(
         except (TypeError, ValueError):
             pass
 
+    volatility = chain.get("volatility") or {}
+    pin = chain.get("pin") or {}
     chain_bias = chain.get("bias", "NEUTRAL")
     data_source = chain.get("data_source", "unknown")
     is_live = "live" in data_source.lower()
     reasons.extend(chain.get("reasons", []))
+    # What the chain is charging for movement, and whether both sides of it are
+    # defending one strike. Both changed the trade on 2026-10-21 and neither
+    # was anywhere on the screen.
+    reasons.extend(volatility.get("notes") or [])
+    if pin.get("is_pin") and pin.get("note"):
+        reasons.append(pin["note"])
 
     # --- 3 & 4. direction + score, both from the ONE scoring engine ---
     # Previously this block ran its own confluence logic and its own confidence
@@ -265,6 +281,8 @@ def analyze_index_option(
         spot=round(spot, 2),
         strike=strike,
         option_type=option_type,
+        volatility=volatility,
+        pin=pin,
         entry_premium=entry,
         target_premium=target,
         stop_premium=stop,

@@ -1269,3 +1269,22 @@ td.cell-flash {
   line-height: 1.45;
   color: var(--text-secondary);
 }
+
+/* Implied volatility and pin chips on the signal card. Neutral ink by
+   default: IV is a fact, not a verdict. The warning tint is reserved for a
+   skew big enough to change which side you buy. */
+.iv-chip {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--surface-3);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  cursor: help;
+}
+.iv-chip--dear { color: var(--warning); border-color: var(--warning); }
+.iv-chip--pin  { color: var(--critical); border-color: var(--critical); }

@@ -384,6 +384,55 @@ def decide_chain_bias(
     return bias, reasons
 
 
+def days_to_expiry(expiry) -> float:
+    """Calendar days to an Angel-format expiry such as ``27OCT2026``.
+
+    Calendar, not trading, days: time value decays over the weekend too, which
+    is exactly the cost a Friday buyer underestimates.
+    """
+    if not expiry:
+        return 0.0
+    import datetime as _dt
+    text = str(expiry).strip().upper()
+    for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
+        try:
+            when = _dt.datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+        return float(max(0, (when - _dt.date.today()).days))
+    return 0.0
+
+
+def _volatility_read(frame, spot: float, expiry) -> dict:
+    """What the chain is charging for movement.
+
+    Never raises: a desk screen must not go blank because one option quote was
+    crossed or stale. VIX is deliberately NOT fetched here -- see
+    :func:`intraday_advisor.options_math.vix_comparison_note`.
+    """
+    try:
+        from intraday_advisor.options_math import analyse_chain_volatility
+        return analyse_chain_volatility(
+            frame, spot, days_to_expiry(expiry)
+        ).as_dict()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Volatility read failed: %s", exc)
+        return {}
+
+
+def _pin_read(ce_wall, pe_wall, max_pain, spot, step) -> dict:
+    """Is the chain defending one strike from both sides?"""
+    try:
+        from intraday_advisor.options_math import detect_pin
+        return detect_pin(
+            float(ce_wall or 0), float(pe_wall or 0), float(max_pain or 0),
+            float(spot or 0), float(step or 50),
+        ).as_dict()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Pin read failed: %s", exc)
+        return {}
+
+
 def suggest_option_trade(symbol: str, spot: float = 0.0,
                          expiry: str | None = None) -> dict:
     """
@@ -518,6 +567,11 @@ def suggest_option_trade(symbol: str, spot: float = 0.0,
     if spot > max_pe_wall and spot < max_ce_wall:
         reasons.append(f"✅ Spot is between support ₹{max_pe_wall:,} and resistance ₹{max_ce_wall:,} — tradable zone")
 
+    _expiry_label = expiry or (
+        filtered["expiry"].iloc[0]
+        if "filtered" in dir() and not filtered.empty else None
+    )
+
     # ── 6. Final recommendation ─────────────────────────────────────────────
     if bias == "CALL":
         rec_strike = atm
@@ -552,8 +606,9 @@ def suggest_option_trade(symbol: str, spot: float = 0.0,
         "data_source":  data_source,
         "live_error":   live_error,
         "spot_source":  spot_source,
-        "expiry":       expiry or (filtered["expiry"].iloc[0]
-                                   if "filtered" in dir() and not filtered.empty else None),
+        "expiry":       _expiry_label,
+        "volatility":   _volatility_read(df_oi, spot, _expiry_label),
+        "pin":          _pin_read(max_ce_wall, max_pe_wall, max_pain, spot, step),
         "expiries":     list_expiries(index),
         "reasons":      reasons,
         "df":           df_oi,

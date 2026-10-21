@@ -307,6 +307,48 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
         broadcaster.request_refresh()
         return
 
+    if kind == "protect_position":
+        """Pull a stop up to net breakeven, or to an explicit premium.
+
+        A stop may only ever be tightened -- the ledger refuses to loosen one,
+        so this endpoint cannot be used to widen a losing trade.
+        """
+        from intraday_advisor.positions import adjust_stop, breakeven_stop
+        try:
+            level = message.get("stop_premium")
+            if level in (None, ""):
+                result = await asyncio.to_thread(
+                    breakeven_stop, message["position_id"],
+                    costs=broadcaster.engine._costs,
+                    db_path=broadcaster.engine.db_path,
+                )
+            else:
+                result = await asyncio.to_thread(
+                    adjust_stop, message["position_id"], float(level),
+                    reason="manual", db_path=broadcaster.engine.db_path,
+                )
+        except (KeyError, ValueError, TypeError) as exc:
+            await socket.send(json.dumps({
+                "type": "error", "message": f"Could not move the stop: {exc}"
+            }))
+            return
+        if not result.get("ok"):
+            await socket.send(json.dumps({
+                "type": "error",
+                "message": result.get("error", "Could not move the stop."),
+            }))
+            return
+        logger.info("Stop moved: %s -> %s", result["old_stop"], result["new_stop"])
+        await socket.send(json.dumps({
+            "type": "ack", "title": "Stop moved",
+            "message": (
+                f"Rs {result['old_stop']:,.2f} to Rs {result['new_stop']:,.2f} "
+                f"- locks in Rs {result['locked_in']:+,.2f} per unit."
+            ),
+        }))
+        broadcaster.request_refresh()
+        return
+
     if kind == "delete_position":
         from intraday_advisor.positions import delete_position
         try:

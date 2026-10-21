@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from intraday_advisor.ledger.costs import OptionsCostModel, net_pnl
+from intraday_advisor.ledger.costs import OptionsCostModel, net_pnl, breakeven_premium
 from intraday_advisor.ledger.recorder import now_ist
 from intraday_advisor.ledger.schema import DEFAULT_LEDGER_PATH, connect, init_ledger
 from intraday_advisor.position_monitor import PositionStatus, evaluate_position
@@ -223,6 +223,115 @@ def evaluate_live(
         position.gross_pnl = position.net_pnl = position.cost_to_exit = 0.0
     return position
 
+
+# --------------------------------------------------------------------------- #
+# Stop management
+# --------------------------------------------------------------------------- #
+
+def adjust_stop(
+    position_id: str, new_stop_premium: float, *,
+    reason: str = "", db_path: str | Path = DEFAULT_LEDGER_PATH,
+) -> dict:
+    """Tighten the stop on an open position. Returns what changed.
+
+    Why this exists
+    ---------------
+    Trading the desk on 2026-10-21 I was +10% on a NIFTY put with the recorded
+    stop still 20% below entry, and there was no way to protect the gain. A
+    position could be opened and closed, never adjusted, so every trade had to
+    run to a fixed stop or be exited whole. That is not how a position is
+    managed: once a trade has paid for itself you stop risking the entry.
+
+    **A stop may only move in the protective direction.** Loosening it is
+    refused outright, not warned about. Widening a stop to avoid being taken
+    out is the single most expensive habit in discretionary trading -- it
+    converts a planned small loss into an unplanned large one, and it always
+    feels justified at the time. The ledger will not help you do it.
+
+    For a long option (all this app trades) protective means UPWARD: a higher
+    stop premium gives back less.
+    """
+    init_ledger(db_path)
+    new_stop = float(new_stop_premium)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM positions WHERE position_id = ?", (position_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "error": "No such position."}
+        if row["status"] != "OPEN":
+            return {"ok": False, "error": f"Position is {row['status']}, not OPEN."}
+
+        entry = float(row["entry_premium"])
+        old_stop = round(entry * (1 - float(row["stop_pct"])), 2)
+        if new_stop <= 0:
+            return {"ok": False, "error": "A stop must be a positive premium."}
+        if new_stop >= entry * 3:
+            return {"ok": False, "error": "That stop is above any plausible exit."}
+        if new_stop < old_stop - 0.005:
+            return {
+                "ok": False,
+                "error": (
+                    f"Refused: that loosens the stop from Rs {old_stop} to "
+                    f"Rs {new_stop}. A stop may only be tightened."
+                ),
+                "old_stop": old_stop,
+            }
+
+        # Stored as a fraction of entry, which is how the rest of the system
+        # reads it, so the monitor and the grader need no special case:
+        # everywhere derives stop_premium = entry * (1 - stop_pct).
+        #
+        # It may be NEGATIVE, and that is the point. A breakeven stop sits at
+        # entry PLUS the round-trip cost, i.e. above the entry, which is a
+        # negative fraction. A `max(0.0, ...)` clamp here silently pinned the
+        # stop to the entry instead -- asked for Rs 164.60 on a Rs 162.75
+        # entry, it stored Rs 162.75 and quietly left the Rs 122 of costs
+        # unprotected. A stop that cannot express "I am now protecting a gain"
+        # cannot protect one.
+        new_pct = (entry - new_stop) / entry
+        conn.execute(
+            "UPDATE positions SET stop_pct = ? WHERE position_id = ?",
+            (round(new_pct, 6), position_id),
+        )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "position_id": position_id,
+        "old_stop": old_stop,
+        "new_stop": round(new_stop, 2),
+        "new_stop_pct": round(new_pct, 4),
+        "locked_in": round(new_stop - entry, 2),
+        "reason": reason or "manual tighten",
+    }
+
+
+def breakeven_stop(
+    position_id: str, *, costs=None, db_path: str | Path = DEFAULT_LEDGER_PATH,
+) -> dict:
+    """Pull the stop to the premium at which the trade nets zero.
+
+    Breakeven is NOT the entry. Entry plus the round-trip cost is the price at
+    which you walk away level, and a stop at the entry still loses you the
+    costs. On the live trade that gap was Rs 1.88 on a Rs 162.75 premium --
+    small per unit, Rs 122 on one lot, and the difference between a scratch and
+    a loss.
+    """
+    init_ledger(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM positions WHERE position_id = ?", (position_id,)
+        ).fetchone()
+        if row is None:
+            return {"ok": False, "error": "No such position."}
+    entry = float(row["entry_premium"])
+    quantity = int(row["lot_size"]) * int(row["lots"])
+    level = breakeven_premium(entry, quantity, costs=costs)
+    return adjust_stop(
+        position_id, level, reason="stop pulled to net breakeven",
+        db_path=db_path,
+    )
 
 def session_summary(
     *, session_date: str | None = None, db_path: str | Path = DEFAULT_LEDGER_PATH

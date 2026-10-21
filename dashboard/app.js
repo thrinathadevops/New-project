@@ -154,6 +154,36 @@ function showToast(event) {
 
 // ---------------------------------------------------------- signal cards ---
 
+/** What the chain charges for movement, and whether it is pinning a strike.
+ *
+ *  "Am I overpaying?" is the first question an option buyer has to answer and
+ *  there was nothing on this screen to answer it from. Measured live on
+ *  2026-10-21 the answer differed by index: NIFTY puts sat at 15.2% IV against
+ *  India VIX 15.9 (fair), while BANKNIFTY puts sat at 17.1% with calls at
+ *  15.0% -- two volatility points dearer for the same bearish view.
+ */
+function volatilityChip(signal) {
+  const v = signal.volatility || {};
+  const pin = signal.pin || {};
+  const bits = [];
+
+  if (v.atm_pe_iv || v.atm_ce_iv) {
+    const dear = (v.skew ?? 0) >= 1 ? ' iv-chip--dear'
+      : (v.skew ?? 0) <= -1 ? ' iv-chip--dear' : '';
+    bits.push(`<span class="iv-chip${dear}" title="Implied volatility backed `
+      + `out of the live premiums. The skew is put IV minus call IV: positive `
+      + `means puts are the dearer side and you pay for that when you buy `
+      + `one.">IV ${v.atm_ce_iv ?? '—'}c / ${v.atm_pe_iv ?? '—'}p${
+        v.skew != null ? ` · skew ${v.skew > 0 ? '+' : ''}${v.skew}` : ''
+      }</span>`);
+  }
+  if (pin.is_pin) {
+    bits.push(`<span class="iv-chip iv-chip--pin" title="${escapeHtml(
+      pin.note || '')}">PIN ${Math.round(pin.strike)}</span>`);
+  }
+  return bits.length ? ' ' + bits.join(' ') : '';
+}
+
 function riskStrip(plan) {
   if (!plan) return '';
   // Distinguish "you do not have the money" from "your own deploy cap is
@@ -309,7 +339,7 @@ function signalCard(signal, changed) {
           <div class="score__note">
             price ${signal.underlying_score ?? '—'} ·
             chain ${escapeHtml(signal.chain_bias || '—')} ·
-            ${escapeHtml(signal.agreement || '—')}
+            ${escapeHtml(signal.agreement || '—')}${volatilityChip(signal)}
           </div>
           <div class="score__note" style="color:var(--text-muted)">
             bar ${escapeHtml((signal.bar_time || '—').slice(0, 19))}
@@ -945,6 +975,12 @@ function updatePositionsLive(positions) {
         POS_ICON[position.status] || ''} ${escapeHtml(
         position.status.replace('_', ' '))}</span>`, { html: true });
     setCell(row, 'action', position.action);
+    // The bracket moves now: Protect pulls the stop up to breakeven. Leaving
+    // these out of the live update meant a stop could move in the ledger and
+    // stay wrong on screen until a reload -- the one number you must be able
+    // to trust at a glance.
+    setCell(row, 'stop', `₹${position.stop_premium.toFixed(2)}`);
+    setCell(row, 'target', `₹${position.target_premium.toFixed(2)}`);
 
     row.classList.toggle('pos-row--alarm', Boolean(position.is_alarm));
     const button = row.querySelector('.close-position');
@@ -1001,8 +1037,8 @@ function renderPositions(snapshot) {
         <td class="num" data-field="premium"
             title="${escapeHtml(position.premium_source || '')}">${
           premiumCell(position)}</td>
-        <td class="num">₹${position.target_premium.toFixed(2)}</td>
-        <td class="num">₹${position.stop_premium.toFixed(2)}</td>
+        <td class="num" data-field="target">₹${position.target_premium.toFixed(2)}</td>
+        <td class="num" data-field="stop">₹${position.stop_premium.toFixed(2)}</td>
         <td class="num ${pnlClass(net)}" data-field="net">
           ${rupees(net, { sign: true })}</td>
         <td class="num ${pnlClass(position.pnl_pct)}" data-field="pnlpct">
@@ -1011,9 +1047,14 @@ function renderPositions(snapshot) {
           position.status.replace('_', ' '))}</span></td>
         <td data-field="action" style="color:var(--text-primary);font-weight:600">
           ${escapeHtml(position.action)}</td>
-        <td><button class="btn btn--danger close-position"
-                    data-id="${escapeHtml(position.position_id)}"
-                    data-premium="${position.current_premium ?? ''}">Close</button></td>
+        <td style="display:flex;gap:5px">
+          <button class="btn btn--ghost protect-position"
+                  data-id="${escapeHtml(position.position_id)}"
+                  title="Move the stop up to net breakeven (entry + costs). A stop can only ever be tightened.">Protect</button>
+          <button class="btn btn--danger close-position"
+                  data-id="${escapeHtml(position.position_id)}"
+                  data-premium="${position.current_premium ?? ''}">Close</button>
+        </td>
       </tr>`;
   }).join('');
 
@@ -1021,6 +1062,11 @@ function renderPositions(snapshot) {
     button.addEventListener('click', () => closePosition(
       button.dataset.id, button.dataset.premium
     ));
+  });
+  body.querySelectorAll('.protect-position').forEach((button) => {
+    button.addEventListener('click', () => {
+      send({ type: 'protect_position', position_id: button.dataset.id });
+    });
   });
 }
 
