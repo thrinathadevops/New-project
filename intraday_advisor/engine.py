@@ -325,6 +325,7 @@ class Engine:
                 lot_size=view.get("lot_size"),
                 step=float(INDEX_CONFIG[index]["step"]),
                 costs=self._costs, limit=self.candidate_count,
+                max_capital_fraction=self.max_capital_fraction,
             )
         except Exception as exc:  # noqa: BLE001 - alternatives are a bonus
             logger.warning("Candidates failed for %s: %s", index, exc)

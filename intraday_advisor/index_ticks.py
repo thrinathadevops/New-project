@@ -101,6 +101,10 @@ def watch_indices(indices) -> dict[str, str]:
         streamer.subscribe(list(found.values()))
     except Exception as exc:  # noqa: BLE001
         logger.debug("Index subscribe failed: %s", exc)
+        return found
+    # Count these towards the status badge: they are genuinely streaming, and
+    # the badge previously showed nothing until an option position existed.
+    live_ticks.register_subscribed(found.values())
     return found
 
 

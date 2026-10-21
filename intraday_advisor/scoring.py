@@ -119,11 +119,24 @@ class ScoreWeights:
 
 @dataclass(frozen=True)
 class SignalScore:
-    score: int                       # clamped 0-100
+    score: int                       # clamped 0-100, for display
     signal_type: str                 # BUY / SELL / HOLD
     bull: list[str] = field(default_factory=list)
     bear: list[str] = field(default_factory=list)
     components: dict[str, float] = field(default_factory=dict)  # feature -> signed points
+    #: The UNCLAMPED total, for ranking and comparison.
+    #:
+    #: There are 32 price-side components carrying 193 points of weight against
+    #: a baseline of 50, so ``score`` hits its 0 or 100 rail as soon as about a
+    #: quarter of the evidence points one way. Saturation is therefore the
+    #: normal state in a decisive market, not an edge case: on 2026-10-21 all
+    #: 30 ranked stocks AND both indices scored exactly 0, which made the
+    #: "ranked by confluence" ordering a 30-way tie -- AXISBANK (ADX 49,
+    #: volume 2.0x, -5.7%) ranked below RELIANCE (ADX 20, +0.6%).
+    #:
+    #: ``score`` stays clamped because 0-100 is the scale people read and the
+    #: calibration is fitted against it. Rank on this instead.
+    raw_score: float = 50.0
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -435,7 +448,8 @@ def score_signal(
     else:
         signal_type = "HOLD"
 
-    return SignalScore(confidence, signal_type, bull, bear, components)
+    return SignalScore(confidence, signal_type, bull, bear, components,
+                       raw_score=round(float(score), 2))
 
 # --------------------------------------------------------------------------- #
 # Index-option direction + score

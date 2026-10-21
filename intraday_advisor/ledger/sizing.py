@@ -142,6 +142,14 @@ class PositionPlan:
 
     affordable: bool
     warnings: list[str] = field(default_factory=list)
+    #: What the deploy cap actually leaves spendable (<= available_capital).
+    #: Without this the UI could only show TOTAL capital, so an unaffordable
+    #: plan read "needs Rs 11,089 / you have Rs 20,000" -- which looks like a
+    #: bug to anyone who can subtract, because the cap was the real
+    #: constraint, not the balance.
+    spendable_capital: float = 0.0
+    #: The deploy cap this plan was sized under, 0-1.
+    max_capital_fraction: float = 1.0
 
     @property
     def risk_band(self) -> str:
@@ -358,6 +366,12 @@ def plan_position(
         stop_premium=round(stop_premium, 2),
         target_premium=round(target_premium, 2),
         available_capital=round(available_capital, 2),
+        # What the deploy cap actually leaves available. Without this the UI
+        # could only show total capital, so an unaffordable plan read
+        # "needs Rs 11,089 / you have Rs 20,000" -- which looks like a bug to
+        # anyone who can subtract, because the cap was the real constraint.
+        spendable_capital=round(spendable, 2),
+        max_capital_fraction=round(float(max(0.0, min(1.0, max_capital_fraction))), 4),
         capital_per_lot=round(capital_per_lot, 2),
         deployed_capital=round(deployed, 2),
         capital_utilisation=round(deployed / denominator, 4) if available_capital > 0 else 0.0,

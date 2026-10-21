@@ -103,15 +103,29 @@ def build_candidates(
     step: float = 100.0,
     costs: OptionsCostModel | None = None,
     limit: int = 8,
+    max_capital_fraction: float = 1.0,
 ) -> list[dict]:
     """Rank tradeable contracts from a live option chain.
 
     ``direction`` is the engine's read (CALL / PUT / WAIT). On WAIT both sides
     are returned unaligned, because the chain is still worth seeing.
+
+    ``max_capital_fraction`` is the deploy cap from the UI. It was previously
+    not accepted at all, so this table sized every contract against the FULL
+    account while the signal card above it sized against the cap -- at a 5%
+    cap the card read "UNAFFORDABLE, needs Rs 11,089" while this table
+    cheerfully offered eight contracts at 11-20% risk. Two answers to the same
+    question on one screen, and the riskier one looked tradeable.
     """
     frame = chain.get("df")
     if frame is None or getattr(frame, "empty", True):
         return []
+
+    # The OI walls, so a strike can be checked against the level it would have
+    # to trade through rather than only against its own liquidity.
+    spot = float(chain.get("spot", 0) or 0)
+    ce_wall = float(chain.get("max_ce_wall", 0) or 0)
+    pe_wall = float(chain.get("max_pe_wall", 0) or 0)
 
     atm = float(chain.get("atm") or 0)
     expiry = chain.get("expiry")
@@ -158,6 +172,7 @@ def build_candidates(
                 available_capital=available_capital,
                 entry_premium=premium, stop_premium=stop, target_premium=target,
                 lot_size=lot_size, costs=costs,
+                max_capital_fraction=max_capital_fraction,
             )
 
             # ---- ranking ------------------------------------------------- #
@@ -207,6 +222,49 @@ def build_candidates(
                 elif share < 0.01:
                     score -= 5
                     notes.append("Thin open interest — wider spreads")
+
+            # ---- the wall you would have to trade THROUGH ---------------- #
+            #
+            # Heavy open interest means two things at once -- a liquid
+            # contract, and a level option writers are defending -- and the
+            # block above only ever credited the flattering one. Observed
+            # 2026-10-21: NIFTY spot 22,722 with the largest put OI on the
+            # board at 22,500 (9.27M). The 22500 PE was offered as a PUT
+            # candidate and scored +5 for "Heavy open interest - liquid",
+            # when buying it is a bet that price breaks the most defended
+            # support on the chain.
+            #
+            # Which reading applies depends on direction and where the strike
+            # sits relative to spot: a wall you take profit INTO is support
+            # for your exit, a wall you must break THROUGH is working against
+            # you the whole way.
+            if spot and spot > 0:
+                if (contract_direction == "PUT" and pe_wall and pe_wall > 0
+                        and strike <= pe_wall < spot):
+                    score -= 20
+                    notes.append(
+                        f"Strike sits at or below the {pe_wall:.0f} PUT wall — "
+                        f"this needs the most defended support to break"
+                    )
+                elif (contract_direction == "CALL" and ce_wall and ce_wall > 0
+                        and strike >= ce_wall > spot):
+                    score -= 20
+                    notes.append(
+                        f"Strike sits at or above the {ce_wall:.0f} CALL wall — "
+                        f"this needs the heaviest resistance to break"
+                    )
+                elif (contract_direction == "PUT" and pe_wall and pe_wall > 0
+                        and strike > pe_wall):
+                    notes.append(
+                        f"Room down to the {pe_wall:.0f} PUT wall — "
+                        f"that level is a sensible place to book"
+                    )
+                elif (contract_direction == "CALL" and ce_wall and ce_wall > 0
+                        and strike < ce_wall):
+                    notes.append(
+                        f"Room up to the {ce_wall:.0f} CALL wall — "
+                        f"that level is a sensible place to book"
+                    )
 
             out.append(Candidate(
                 index=index, strike=strike, option_type=option_type,

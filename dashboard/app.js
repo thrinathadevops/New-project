@@ -156,6 +156,12 @@ function showToast(event) {
 
 function riskStrip(plan) {
   if (!plan) return '';
+  // Distinguish "you do not have the money" from "your own deploy cap is
+  // blocking it". Showing total capital next to "needed per lot" made the
+  // second case read as an arithmetic error.
+  const capped = plan.max_capital_fraction < 1
+    && plan.spendable_capital < plan.capital_per_lot
+    && plan.available_capital >= plan.capital_per_lot;
   if (!plan.affordable) {
     return `
       <div class="risk risk--UNAFFORDABLE">
@@ -164,8 +170,13 @@ function riskStrip(plan) {
           <b>${rupees(plan.capital_per_lot)}</b><span>needed per lot</span>
         </div>
         <div class="risk__metric">
-          <b>${rupees(plan.available_capital)}</b><span>you have</span>
+          <b>${rupees(capped ? plan.spendable_capital : plan.available_capital)}</b>
+          <span>${capped ? `deployable (${Math.round(
+            plan.max_capital_fraction * 100)}% cap)` : 'you have'}</span>
         </div>
+        ${capped ? `<div class="risk__note">Your balance is ${rupees(
+          plan.available_capital)} — the deploy cap is what blocks this, not the
+          balance. Raise the cap or pick a cheaper strike.</div>` : ''}
       </div>`;
   }
   const icon = { SAFE: '✓', CAUTION: '!', SEVERE: '‼' }[plan.risk_band] || '';
@@ -1704,6 +1715,44 @@ function send(message) {
   }
 }
 
+/** What the deploy slider should say about risk.
+ *
+ *  It used to say `stop_pct * deploy_pct`, which is the arithmetic for a
+ *  position you can size to the rupee. An option lot cannot be subdivided, so
+ *  that figure was wrong in BOTH directions, as measured on 2026-10-21:
+ *
+ *    deploy 100% -> label promised 20.0%, the sized plan risked 11.5%
+ *    deploy   5% -> label promised  1.0%, the plan was UNAFFORDABLE
+ *
+ *  A risk number a trader sizes from must come from the sized position, not
+ *  from an intention. So: report the measured worst case across the live
+ *  plans, and while dragging (before the recompute lands) state the cap as a
+ *  rupee budget -- a fact -- rather than a risk the position may not honour.
+ */
+function deployHint({ pending = false } = {}) {
+  const capital = Number($('capital').value) || 0;
+  const pct = Number($('deploy').value) || 0;
+  const budget = capital * (pct / 100);
+
+  if (pending) return `deploying at most ${rupees(budget)} — recomputing…`;
+
+  const plans = (state.snapshot?.signals || [])
+    .map((s) => s.plan)
+    .filter(Boolean);
+  if (!plans.length) return `deploying at most ${rupees(budget)}`;
+
+  const sized = plans.filter((p) => p.affordable);
+  if (!sized.length) {
+    const cheapest = Math.min(...plans.map((p) => p.capital_per_lot || Infinity));
+    return `no contract fits ${rupees(budget)} — cheapest lot is ${
+      rupees(cheapest)}`;
+  }
+  // The worst case is what matters: it is the one that can hurt.
+  const worst = Math.max(...sized.map((p) => p.risk_pct_of_capital || 0));
+  return `one stop costs ${(worst * 100).toFixed(1)}% of capital — measured, `
+    + `not estimated (one lot is indivisible)`;
+}
+
 function pushSettings() {
   send({
     type: 'settings',
@@ -1824,8 +1873,7 @@ function syncControls(settings) {
   const deploy = Math.round((settings.max_capital_fraction ?? 1) * 100);
   $('deploy').value = deploy;
   setText($('deploy-val'), `${deploy}%`);
-  const implied = (settings.stop_pct ?? 0.2) * (deploy / 100);
-  setText($('deploy-hint'), `one stop ≈ ${(implied * 100).toFixed(1)}% of capital`);
+  setText($('deploy-hint'), deployHint());
 }
 
 /** Move the chart to the live price between snapshots.
@@ -1906,6 +1954,10 @@ function applySnapshot(snapshot) {
 
   renderHeader(snapshot);
   renderSignals(snapshot);
+  // Derived from the plans, so it refreshes every snapshot. syncControls is
+  // latched to run once (it must not overwrite what the user is typing), and
+  // that latch previously froze this hint on the first snapshot's answer.
+  setText($('deploy-hint'), deployHint());
   renderKpis(snapshot);
   renderPositions(snapshot);
   renderMarketPicker(snapshot);
@@ -1943,10 +1995,7 @@ function wireControls() {
   const deploy = $('deploy');
   deploy.addEventListener('input', () => {
     setText($('deploy-val'), `${deploy.value}%`);
-    const stop = Number($('stop').value) / 100;
-    const implied = stop * (Number(deploy.value) / 100);
-    setText($('deploy-hint'),
-      `one stop ≈ ${(implied * 100).toFixed(1)}% of capital`);
+    setText($('deploy-hint'), deployHint({ pending: true }));
   });
   deploy.addEventListener('change', pushSettings);
 

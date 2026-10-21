@@ -72,6 +72,8 @@ class StockRow:
     signal: str                   # BUY / SELL / HOLD
     #: LONG or SHORT -- which way the bracket below is oriented.
     side: str = "LONG"
+    #: Unclamped directional strength. `score` saturates; this is what ranks.
+    raw_score: float | None = None
     # --- the read ---
     trend: str = ""
     above_vwap: bool = False
@@ -240,6 +242,7 @@ def screen_one(
         price=round(price, 2),
         change_pct=round(change_pct, 2),
         score=scored.score,
+        raw_score=scored.raw_score,
         signal=scored.signal_type,
         trend=getattr(smart, "order_flow", "") or "",
         above_vwap=smart.vwap_relation == "above VWAP",
@@ -357,7 +360,12 @@ def screen_universe(
 
     # Directional conviction first: the score is a distance from the neutral
     # 50, so a strong SELL is as interesting as a strong BUY.
-    scored.sort(key=lambda r: abs(r.score - 50), reverse=True)
+    # Rank on the UNCLAMPED strength. `score` rails at 0/100 once about a
+    # quarter of the 193 points of component weight fires one way, so in a
+    # decisive market every row ties -- measured 2026-10-21: all 30 rows
+    # scored exactly 0 and the ordering carried no information.
+    scored.sort(key=lambda r: abs((r.raw_score if r.raw_score is not None
+                                   else r.score) - 50), reverse=True)
     top = scored[:limit]
 
     meta = {

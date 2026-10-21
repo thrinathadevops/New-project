@@ -108,6 +108,25 @@ def watch(tokens: list[str]) -> None:
         _STATE["last_error"] = f"subscribe failed: {exc}"
 
 
+def register_subscribed(tokens) -> None:
+    """Record tokens as streaming, for the status badge, without subscribing.
+
+    Index tokens ride a different exchange segment and are subscribed by
+    :mod:`intraday_advisor.index_ticks` via ``subscribe_segment``. They never
+    passed through :func:`watch`, so ``status()["subscribed"]`` counted only
+    option contracts -- and with no position open it was 0, so the header read
+    "TICKS --" while index ticks were arriving 0.02s old and driving the chart
+    and every spot figure on screen. A status that under-reports a working
+    feed teaches you to distrust the one indicator that tells you the feed
+    died.
+    """
+    tokens = [str(t) for t in tokens if t]
+    if not tokens:
+        return
+    with _LOCK:
+        _STATE["subscribed"].update(tokens)
+
+
 def live_price(token: str | None) -> tuple[float | None, float | None]:
     """Latest streamed price and its age in seconds.
 

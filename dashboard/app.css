@@ -1251,3 +1251,13 @@ td.cell-flash {
   border: 1px solid var(--border-strong);
   cursor: help;
 }
+
+/* Explains which constraint bound, when the deploy cap (not the balance)
+   is what makes a position unaffordable. */
+.risk__note {
+  flex-basis: 100%;
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
