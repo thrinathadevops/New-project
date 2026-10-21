@@ -197,3 +197,44 @@ def test_a_short_reward_risk_uses_absolute_distances():
 def test_a_short_row_warns_that_it_needs_margin():
     row = a_sell_row()
     assert any("SHORT" in w for w in row.warnings)
+
+
+# ====================================== 3. a NaN is not a bearish signal ==
+
+def test_an_unavailable_vwap_is_not_scored_as_bearish():
+    """NSE index candles carry Volume = 0, so VWAP is NaN. The old two-way
+    "above or else below" resolved that to "below VWAP" -- a free -5 bearish
+    point on every index signal, forever. Measured on NIFTY 2026-10-21."""
+    from intraday_advisor.scoring import score_signal
+    from intraday_advisor.smart_money import VWAP_UNAVAILABLE
+
+    unavailable = score_signal({}, vwap_relation=VWAP_UNAVAILABLE)
+    below = score_signal({}, vwap_relation="below VWAP")
+    above = score_signal({}, vwap_relation="above VWAP")
+
+    assert "vwap" not in unavailable.components
+    assert below.components["vwap"] < 0
+    assert above.components["vwap"] > 0
+    assert unavailable.score > below.score, "a missing input must not read bearish"
+
+
+def test_a_zero_volume_series_reports_vwap_unavailable():
+    from intraday_advisor.indicators import add_indicators
+    from intraday_advisor.smart_money import VWAP_UNAVAILABLE, analyze_smart_money
+
+    frame = candles(bars=300)
+    frame["Volume"] = 0                      # exactly what an index feed gives
+    result = analyze_smart_money(add_indicators(frame))
+
+    assert result.vwap_relation == VWAP_UNAVAILABLE
+    assert any("VWAP unavailable" in w for w in result.warnings)
+    assert not any("price is below VWAP" in w for w in result.warnings)
+
+
+def test_a_real_volume_series_still_decides_vwap():
+    from intraday_advisor.indicators import add_indicators
+    from intraday_advisor.smart_money import VWAP_UNAVAILABLE, analyze_smart_money
+
+    result = analyze_smart_money(add_indicators(candles(bars=300)))
+    assert result.vwap_relation != VWAP_UNAVAILABLE
+    assert result.vwap_relation in ("above VWAP", "below VWAP")

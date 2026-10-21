@@ -40,6 +40,12 @@ class SmartMoneyReport:
     warnings: list[str]
 
 
+#: Returned when VWAP cannot be computed -- an index series with no volume,
+#: or too few bars. Scoring must treat this as NO evidence either way, never
+#: as "below".
+VWAP_UNAVAILABLE = "VWAP unavailable"
+
+
 def detect_fair_value_gaps(df: pd.DataFrame) -> list[FairValueGap]:
     gaps: list[FairValueGap] = []
     for position in range(2, len(df)):
@@ -150,7 +156,20 @@ def analyze_smart_money(df: pd.DataFrame) -> SmartMoneyReport:
     flow, cumulative_delta = order_flow_proxy(usable)
     profile = build_volume_profile(usable.tail(120))
     last = usable.iloc[-1]
-    vwap_relation = "above VWAP" if "VWAP" in usable and last["Close"] > last["VWAP"] else "below VWAP"
+    # Three states, not two. This was a two-way "above or else below", which
+    # silently resolved an UNAVAILABLE VWAP to "below VWAP": NSE index candles
+    # carry Volume = 0, so VWAP is NaN, and `close > NaN` is False -- so every
+    # index signal reported price below VWAP no matter where price actually
+    # was, scoring a free -5 bearish point forever. Measured on NIFTY
+    # 2026-10-21: VWAP NaN, relation "below VWAP", component vwap -5.0.
+    # A comparison against NaN is not evidence; say so instead.
+    vwap_value = last.get("VWAP") if "VWAP" in usable else None
+    if vwap_value is None or pd.isna(vwap_value):
+        vwap_relation = VWAP_UNAVAILABLE
+    elif last["Close"] > vwap_value:
+        vwap_relation = "above VWAP"
+    else:
+        vwap_relation = "below VWAP"
     reasons: list[str] = [f"liquidity: {sweep}", f"order flow: {flow}", f"volume POC: {profile.point_of_control}"]
     warnings: list[str] = []
 
@@ -171,6 +190,11 @@ def analyze_smart_money(df: pd.DataFrame) -> SmartMoneyReport:
         warnings.append("bullish FVG is not paired with price above EMA9/EMA21")
     if vwap_relation == "below VWAP":
         warnings.append("price is below VWAP")
+    elif vwap_relation == VWAP_UNAVAILABLE:
+        # Named, because a missing input should be visible rather than mute.
+        warnings.append(
+            "VWAP unavailable (no volume on this series) - not scored"
+        )
     if flow == "seller-dominant order flow":
         warnings.append("order flow proxy favors sellers")
     if sweep == "bearish liquidity sweep":

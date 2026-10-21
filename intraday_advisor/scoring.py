@@ -205,6 +205,10 @@ def score_signal(
     elif decision_signal == "SELL":
         add("ema_signal", -w.ema_signal, bear_msg="EMA swing-breakout SELL")
 
+    # Only the two decided states score. A third state, "VWAP unavailable"
+    # (an index series carries no volume, so VWAP is NaN), deliberately falls
+    # through and scores NOTHING -- it used to arrive here as "below VWAP" and
+    # bought a free -5 bearish point on every index signal.
     if vwap_relation == "above VWAP":
         add("vwap", w.vwap, bull_msg="Price above VWAP")
     elif vwap_relation == "below VWAP":
