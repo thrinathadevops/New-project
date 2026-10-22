@@ -361,9 +361,22 @@ def by_dimension(
 
     frame = frame.copy()
     if dimension == "hour":
-        frame["hour"] = pd.to_datetime(
-            frame["bar_time"], errors="coerce", format="mixed"
-        ).dt.hour
+        # utc=True, then convert to IST.
+        #
+        # Without utc=True, a column holding MIXED offsets parses to object
+        # dtype and `.dt` raises -- which it did as soon as the ledger held
+        # three sessions written across a DST-free but offset-inconsistent set
+        # of rows. The hour breakdown is the analysis most worth having, so it
+        # must not be the one that breaks when more data arrives.
+        #
+        # The conversion back to Asia/Kolkata matters: bucketing by UTC hour
+        # would shift every Indian session by 5:30 and put the open in the
+        # "03:00" bucket.
+        frame["hour"] = (
+            pd.to_datetime(frame["bar_time"], errors="coerce", utc=True)
+            .dt.tz_convert("Asia/Kolkata")
+            .dt.hour
+        )
     if dimension not in frame.columns:
         raise ValueError(
             f"Unknown dimension {dimension!r}. Available: {sorted(frame.columns)}"

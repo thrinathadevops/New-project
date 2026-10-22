@@ -184,6 +184,21 @@ def run_session(
         remaining = minutes_to_square_off()
         open_now = load_open_positions(db_path=db_path)
 
+        # Sample the MARKET, every cycle, not just where a trade happened.
+        # A trade is a biased slice of the session -- it says nothing about the
+        # hours when nothing was taken, and those are most of the day. Three
+        # sessions in, the only positive one is unexplainable because nothing
+        # recorded what kind of day it was.
+        try:
+            from intraday_advisor.observe import record_observations
+
+            record_observations(
+                snapshot, db_path=db_path, open_positions=len(open_now),
+                open_pnl=state.realised,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.debug("Observation not recorded: %s", exc)
+
         # One chain fetch per index per cycle, shared by every position on it.
         chain_cache: dict = {}
 

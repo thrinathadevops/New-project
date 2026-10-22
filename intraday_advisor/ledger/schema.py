@@ -244,6 +244,45 @@ CREATE TABLE IF NOT EXISTS position_legs (
 
 CREATE INDEX IF NOT EXISTS idx_legs_position ON position_legs(position_id);
 
+-- A periodic snapshot of MARKET CONDITIONS, not of trades.
+--
+-- The ledger records what the system decided and what happened to it, and
+-- after three sessions that was still not enough to answer the most useful
+-- question available: *what was different about the one day that worked?*
+-- 2026-10-22 returned +Rs 478 per signal with a 60% target rate while the
+-- other two sessions lost about Rs 1,200 per signal, and nothing stored says
+-- why -- what the regime was, where volatility sat, how breadth behaved.
+--
+-- Sampled every cycle rather than per trade, so a day has a shape rather than
+-- a handful of points. One row is cheap; a day is roughly 500 of them.
+CREATE TABLE IF NOT EXISTS observations (
+    observed_at     TEXT NOT NULL,
+    session_date    TEXT NOT NULL,
+    index_name      TEXT NOT NULL,
+    spot            REAL,
+    direction       TEXT,
+    score           INTEGER,
+    underlying_score INTEGER,
+    chain_bias      TEXT,
+    agreement       TEXT,
+    agent_stance    TEXT,
+    regime          TEXT,
+    conviction      REAL,
+    vix             REAL,
+    breadth_pct     REAL,
+    range_position  REAL,
+    atm_ce_iv       REAL,
+    atm_pe_iv       REAL,
+    iv_skew         REAL,
+    pcr             REAL,
+    max_pain        REAL,
+    open_positions  INTEGER,
+    open_pnl        REAL,
+    PRIMARY KEY (observed_at, index_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_obs_session ON observations(session_date);
+
 -- --------------------------------------------------------------- reporting
 -- Signals joined to outcomes, synthetic data excluded. Every report reads
 -- this rather than re-deriving the join (and re-forgetting the filter).

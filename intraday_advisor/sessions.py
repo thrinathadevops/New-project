@@ -202,3 +202,117 @@ def render(series: SessionSeries) -> str:
         lines.append(f"    - {note}")
     lines.append("=" * 72)
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Coverage: is an hour-by-hour comparison even legitimate?
+# --------------------------------------------------------------------------- #
+
+#: NSE trades 09:15-15:30, so these are the hour buckets a full session has.
+SESSION_HOURS = (9, 10, 11, 12, 13, 14, 15)
+
+
+def hour_coverage(*, db_path: str | Path = "data/ledger.sqlite", **filters) -> dict:
+    """Which hours each session actually sampled, and whether hours comparable.
+
+    This exists because an hour breakdown lied and nearly took me with it.
+
+    Pooled over the first three sessions, hour 9 showed an **88.9% win rate and
+    +Rs 1,630 per lot** against negative figures everywhere else -- an apparent
+    opening edge. All 18 of those trades were from 2026-10-22, the single
+    positive session, because the recorder was not running before 09:15 on the
+    other two days. The "opening edge" and "22 October was a good day" were the
+    same fact, sliced differently.
+
+    The coverage differs per session for a mundane reason -- the server was
+    started at a different time each day -- and the consequence is not mundane:
+    **every hour-versus-hour comparison is confounded with which day it was.**
+    An hour sampled on one session cannot be compared with an hour sampled on
+    another, and nothing in a pooled table shows that.
+
+    So this reports, per hour, how many distinct sessions contributed. An hour
+    seen in one session is an anecdote about that session.
+    """
+    from intraday_advisor.ledger.report import load_graded
+
+    frame = load_graded(db_path=db_path, **filters)
+    if frame.empty:
+        return {"sessions": 0, "hours": {}, "comparable_hours": [],
+                "notes": ["No graded trades yet."]}
+
+    frame = frame.copy()
+    frame["hour"] = (
+        pd.to_datetime(frame["bar_time"], errors="coerce", utc=True)
+        .dt.tz_convert("Asia/Kolkata").dt.hour
+    )
+    sessions = sorted(frame["session_date"].dropna().unique())
+    hours: dict = {}
+    for hour in SESSION_HOURS:
+        chunk = frame[frame["hour"] == hour]
+        covered = sorted(chunk["session_date"].dropna().unique())
+        hours[hour] = {
+            "trades": int(len(chunk)),
+            "sessions": [str(s) for s in covered],
+            "session_count": len(covered),
+            "mean_net": (round(float(chunk["net_pnl_per_lot"].mean()), 2)
+                         if len(chunk) else None),
+        }
+
+    comparable = [h for h, v in hours.items() if v["session_count"] >= 3]
+    single = [h for h, v in hours.items() if v["session_count"] == 1]
+    missing = [h for h, v in hours.items() if v["session_count"] == 0]
+
+    notes = []
+    if single:
+        notes.append(
+            f"Hour(s) {single} appear in ONE session only. Their numbers "
+            f"describe that day, not that hour -- pooling them with other "
+            f"hours compares days, not times."
+        )
+    if missing:
+        notes.append(
+            f"Hour(s) {missing} were never sampled. Start the recorder before "
+            f"09:15 and leave it to the close, or the day's shape is unknown."
+        )
+    if not comparable:
+        notes.append(
+            "No hour yet appears in three or more sessions, so no hour-by-hour "
+            "claim is supportable."
+        )
+    return {
+        "sessions": len(sessions),
+        "session_dates": [str(s) for s in sessions],
+        "hours": hours,
+        "comparable_hours": comparable,
+        "single_session_hours": single,
+        "unsampled_hours": missing,
+        "notes": notes,
+    }
+
+
+def render_coverage(coverage: dict) -> str:
+    """Plain text, so a confounded comparison is visible before it is believed."""
+    if not coverage.get("hours"):
+        return "No graded trades yet."
+
+    lines = [
+        "=" * 72,
+        "HOUR COVERAGE  (can these hours legitimately be compared?)",
+        "=" * 72,
+        f"  {'hour':>5} {'trades':>8} {'sessions':>9} {'mean net':>11}  status",
+    ]
+    for hour, entry in coverage["hours"].items():
+        count = entry["session_count"]
+        status = ("comparable" if count >= 3
+                  else f"only {count} session(s)" if count
+                  else "NEVER SAMPLED")
+        mean = (f"{entry['mean_net']:,.0f}" if entry["mean_net"] is not None
+                else "-")
+        lines.append(
+            f"  {hour:5} {entry['trades']:8} {count:9} {mean:>11}  {status}"
+        )
+    lines.append("")
+    for note in coverage["notes"]:
+        lines.append(f"  - {note}")
+    lines.append("=" * 72)
+    return "\n".join(lines)

@@ -139,6 +139,29 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_coverage(args) -> int:
+    """Can the hours legitimately be compared, or is each a different day?"""
+    from intraday_advisor.sessions import hour_coverage, render_coverage
+
+    print(render_coverage(hour_coverage(db_path=args.db)))
+    return 0
+
+
+def cmd_shape(args) -> int:
+    """What kind of day was it: regime, volatility, breadth, conviction."""
+    from intraday_advisor.observe import compare_sessions, session_shape
+    import json
+
+    frame = compare_sessions(db_path=args.db)
+    if frame is not None and not frame.empty:
+        print("SESSION SHAPE (from market samples, one row per day)")
+        print(frame.to_string())
+        print()
+    print(json.dumps(session_shape(getattr(args, "date", None),
+                                   db_path=args.db), indent=1, default=str))
+    return 0
+
+
 def cmd_sessions(args) -> int:
     """Session-by-session, because the spread between days exceeds the effect."""
     from intraday_advisor.sessions import render, session_series
@@ -402,6 +425,13 @@ def main(argv=None) -> int:
         help="session-by-session: is it an edge, or was one day lucky?",
     )
     sessions.set_defaults(func=cmd_sessions)
+    coverage = subparsers.add_parser(
+        "coverage", help="are the hours comparable, or is each a different day?")
+    coverage.set_defaults(func=cmd_coverage)
+    shape = subparsers.add_parser(
+        "shape", help="what kind of day was it (regime, vix, breadth, skew)")
+    shape.add_argument("--date", default=None, help="session date, default today")
+    shape.set_defaults(func=cmd_shape)
 
     costs = subparsers.add_parser("costs", help="cost drag at a given premium")
     costs.add_argument("premium", type=float)
