@@ -251,6 +251,49 @@ def record_signal(
             conn.close()
 
 
+def record_agent_verdict(
+    signal_id: str | None, agent: dict | None, *,
+    db_path: str | Path = DEFAULT_LEDGER_PATH, conn=None,
+) -> bool:
+    """Stamp the agent's verdict onto a signal that is already recorded.
+
+    Written as an update rather than as part of the insert because of ordering:
+    the engine records each signal while building it, and the agent layer runs
+    afterwards over the assembled snapshot (it needs the regime and the mode,
+    which are not known per-signal). Reordering a working recording path to
+    suit one new column would have risked the thing that is working.
+
+    Why it matters: AGENTS.md states that every vetoed setup is recorded "so in
+    time you can ask the only question that settles it: would the vetoed trades
+    have made money?" Nothing stored the stance, so 142 graded trades pooled the
+    vetoed and the approved together and the agent layer's entire purpose was
+    unmeasurable. If the vetoes are the losers, this ledger is hiding an edge.
+    """
+    if not signal_id or not agent:
+        return False
+    stance = agent.get("stance")
+    if not stance:
+        return False
+
+    own_conn = conn is None
+    if own_conn:
+        init_ledger(db_path)
+        conn = connect(db_path)
+    try:
+        cursor = conn.execute(
+            "UPDATE signals SET agent_stance = ?, agent_provider = ?, "
+            "agent_degraded = ? WHERE signal_id = ?",
+            (str(stance), str(agent.get("provider") or ""),
+             1 if agent.get("degraded") else 0, signal_id),
+        )
+        if own_conn:
+            conn.commit()
+        return bool(cursor.rowcount)
+    finally:
+        if own_conn:
+            conn.close()
+
+
 def _field(obj: Any, key: str, default: Any = None) -> Any:
     """Read a field from a dataclass-like object or a mapping.
 

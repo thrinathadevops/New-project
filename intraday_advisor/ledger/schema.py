@@ -109,7 +109,13 @@ CREATE TABLE IF NOT EXISTS signals (
     data_source      TEXT,
     is_live          INTEGER NOT NULL DEFAULT 0,
     is_synthetic     INTEGER NOT NULL DEFAULT 0,
-    engine_version   TEXT NOT NULL
+    engine_version   TEXT NOT NULL,
+    -- What the agent layer said when this signal was recorded, so the
+    -- question AGENTS.md promises can actually be asked: would the vetoed
+    -- trades have made money?
+    agent_stance     TEXT,
+    agent_provider   TEXT,
+    agent_degraded   INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_signals_session  ON signals(session_date);
@@ -280,10 +286,58 @@ def connect(db_path: str | Path = DEFAULT_LEDGER_PATH) -> sqlite3.Connection:
     return conn
 
 
+#: Columns added after the first ledgers were written. ``CREATE TABLE IF NOT
+#: EXISTS`` is a no-op on an existing table, so a new column needs a real
+#: ALTER -- otherwise the application silently writes to a column that is not
+#: there and every insert fails at runtime rather than at deploy.
+ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "signals": [
+        # What the agent layer said at the moment the signal was recorded.
+        #
+        # AGENTS.md states that "every vetoed setup is still recorded by the
+        # ledger, so in time you can ask: would the vetoed trades have made
+        # money?" That was not true -- nothing stored the stance, so 142 graded
+        # trades pooled the vetoed and the approved together and the agent's
+        # whole purpose was unmeasurable.
+        ("agent_stance", "TEXT"),
+        ("agent_provider", "TEXT"),
+        ("agent_degraded", "INTEGER"),
+    ],
+}
+
+
+def _add_missing_columns(conn) -> list[str]:
+    """Bring an existing ledger up to the current column set. Idempotent."""
+    added: list[str] = []
+    for table, columns in ADDED_COLUMNS.items():
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        if not existing:
+            continue        # table not created yet; SCHEMA will define it fully
+        for name, decl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+                added.append(f"{table}.{name}")
+    return added
+
+
 def init_ledger(db_path: str | Path = DEFAULT_LEDGER_PATH) -> None:
-    """Create tables, indexes and the reporting view. Idempotent."""
+    """Create tables, indexes and the reporting view. Idempotent.
+
+    Also migrates an older ledger by adding any column the application now
+    writes, because a schema built only from ``CREATE TABLE IF NOT EXISTS``
+    cannot evolve a table that already exists.
+    """
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        added = _add_missing_columns(conn)
+        if added:
+            conn.commit()
+            import logging
+            logging.getLogger("ledger").info(
+                "Ledger migrated: added %s", ", ".join(added)
+            )
 
 
 def ledger_stats(db_path: str | Path = DEFAULT_LEDGER_PATH) -> dict:

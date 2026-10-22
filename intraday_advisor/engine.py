@@ -337,6 +337,19 @@ class Engine:
 
         # --- record for grading ---
         view["recorded"] = False
+        # A signal is only recorded as REAL while the market is open.
+        #
+        # `is_live` means the premiums came from the broker, not that the
+        # market is trading: after the close Angel keeps serving last-traded
+        # prices, so a snapshot at 22:50 produced a signal flagged live and
+        # recorded as non-synthetic. Grading it later would resolve a stop
+        # against bars that do not exist, and it would enter a track record as
+        # though it had been a tradeable opportunity.
+        #
+        # The existing ledger turned out clean -- all five after-hours rows had
+        # fallen back to estimated prices and were already marked synthetic --
+        # so this closes the path rather than repairing damage.
+        tradeable_now = is_market_open()
         if self.record and signal.direction in ("CALL", "PUT") and signal.bar_time:
             try:
                 token = _option_token(index, signal.strike, signal.option_type)
@@ -349,7 +362,7 @@ class Engine:
                     features=signal.features,
                     score_components=signal.score_components,
                     available_capital=self.available_capital,
-                    is_synthetic=not signal.is_live,
+                    is_synthetic=not (signal.is_live and tradeable_now),
                     engine_version=ENGINE_VERSION,
                     db_path=self.db_path,
                 )
@@ -774,6 +787,11 @@ class Engine:
                 signal["agent"] = {"stance": "CAUTION", "summary": f"Review failed: {exc}",
                                    "concerns": [], "supports": [], "provider": "error",
                                    "degraded": True}
+            finally:
+                # Stamp the verdict onto the recorded row, whatever it was --
+                # including a degraded CAUTION, because "the agent was down"
+                # is itself a condition worth measuring outcomes against.
+                self._stamp_agent(signal)
 
         any_live = any(s.get("is_live") for s in signals)
         market = is_market_open()
@@ -850,6 +868,20 @@ class Engine:
         })
 
     # ------------------------------------------------------------------ ledger
+
+    def _stamp_agent(self, signal: dict) -> None:
+        """Attach the agent's verdict to the signal's recorded row."""
+        signal_id = signal.get("signal_id")
+        agent = signal.get("agent")
+        if not signal_id or not agent:
+            return
+        try:
+            from intraday_advisor.ledger.recorder import record_agent_verdict
+
+            record_agent_verdict(signal_id, agent, db_path=self.db_path)
+        except Exception as exc:  # noqa: BLE001 - a stamp must never break a snapshot
+            logger.debug("Could not stamp agent verdict: %s", exc)
+
     def _ledger_panel(self) -> dict:
         """Edge measurement for the dashboard, with its honest caveats."""
         try:
