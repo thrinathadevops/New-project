@@ -139,6 +139,14 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_sessions(args) -> int:
+    """Session-by-session, because the spread between days exceeds the effect."""
+    from intraday_advisor.sessions import render, session_series
+
+    print(render(session_series(db_path=args.db)))
+    return 0
+
+
 def cmd_bands(args) -> int:
     """Performance by score band: does a higher score mean a better trade?"""
     bands = score_band_report(db_path=args.db)
@@ -389,6 +397,11 @@ def main(argv=None) -> int:
 
     bands = subparsers.add_parser("bands", help="performance by score band")
     bands.set_defaults(func=cmd_bands)
+    sessions = subparsers.add_parser(
+        "sessions",
+        help="session-by-session: is it an edge, or was one day lucky?",
+    )
+    sessions.set_defaults(func=cmd_sessions)
 
     costs = subparsers.add_parser("costs", help="cost drag at a given premium")
     costs.add_argument("premium", type=float)

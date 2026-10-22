@@ -40,6 +40,13 @@ class LivePosition:
     opened_at: str
     option_token: str | None = None
     signal_id: str | None = None
+    #: Free text stored with the position. The paper desk puts the agent's
+    #: stance here so a day's P&L can be split by PROCEED / CAUTION / VETO.
+    #: It was missing from this dataclass while being written to the database,
+    #: so `getattr(position, "notes", "")` silently returned "" and an entire
+    #: session's stance breakdown came back as UNKNOWN -- the one thing that
+    #: run existed to measure.
+    notes: str = ""
 
     # live, refreshed each snapshot
     current_premium: float | None = None
@@ -174,6 +181,7 @@ def load_open_positions(
             opened_at=row["opened_at"],
             option_token=row["option_token"],
             signal_id=row["signal_id"],
+            notes=row["notes"] or "",
             deployed=round(entry * lot_size * lots, 2),
         ))
     return out

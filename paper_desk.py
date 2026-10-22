@@ -68,6 +68,12 @@ class DeskState:
     errors: int = 0
     started_at: str = ""
     last_snapshot: str = ""
+    #: Actionable signals seen while every slot was full. The gap between this
+    #: and `opened` is the cost of the capacity constraint, which on
+    #: 2026-10-22 was the difference between +Rs 44,014 and -Rs 7,738.
+    passed_on_full: int = 0
+    #: Distinct contracts the strategy wanted, whether or not they were taken.
+    signals_seen: set = field(default_factory=set)
 
     def note(self, stance: str, net: float) -> None:
         entry = self.by_stance.setdefault(
@@ -230,14 +236,42 @@ def run_session(
                     )
 
         # --- open new ones, while there is time for them to work --------- #
+        # Count what the strategy wanted, independently of what fitted.
+        for sig in snapshot.get("signals", []):
+            if sig.get("direction") in ("CALL", "PUT") and sig.get("strike"):
+                state.signals_seen.add(
+                    f"{sig['index']}|{sig['strike']:.0f}|{sig['option_type']}"
+                )
+
         can_open = (
             is_market_open()
             and remaining is not None
             and remaining > NO_NEW_TRADES_BEFORE_CLOSE
             and len(load_open_positions(db_path=db_path)) < max_open
         )
-        if can_open:
+        if not can_open and is_market_open():
             for sig in snapshot.get("signals", []):
+                if sig.get("direction") in ("CALL", "PUT"):
+                    state.passed_on_full += 1
+
+        if can_open:
+            # Rank before taking, because capacity is the binding constraint.
+            #
+            # Measured 2026-10-22: the strategy produced 92 signals and this
+            # desk, holding two at a time, took 18 of them -- and *which* 18 was
+            # decided by when a slot happened to be free, which is uncorrelated
+            # with quality. The full signal set returned +Rs 478 per signal
+            # that day; the 20% sample this desk harvested lost Rs 7,738.
+            #
+            # If capacity must bind, it should bind on the best available
+            # signal rather than the earliest. Sorted by distance from neutral
+            # so a strong PUT ranks with a strong CALL.
+            ranked = sorted(
+                snapshot.get("signals", []),
+                key=lambda s: abs(float(s.get("score") or 50) - 50),
+                reverse=True,
+            )
+            for sig in ranked:
                 if len(load_open_positions(db_path=db_path)) >= max_open:
                     break
                 if sig.get("direction") not in ("CALL", "PUT"):
@@ -325,14 +359,28 @@ def summarise(state: DeskState, db_path: str) -> str:
     from intraday_advisor.ledger.report import expectancy_report
     from intraday_advisor.positions import session_summary
 
+    wanted = len(state.signals_seen)
+    captured = (state.opened / wanted * 100) if wanted else 0.0
+    per_trade = (state.realised / state.closed) if state.closed else 0.0
+
     lines = [
         "=" * 68,
         "PAPER SESSION SUMMARY",
         "=" * 68,
-        f"  opened            {state.opened}",
-        f"  closed            {state.closed}",
-        f"  realised net      Rs {state.realised:+,.2f}",
-        f"  snapshot errors   {state.errors}",
+        f"  distinct contracts the strategy wanted   {wanted}",
+        f"  positions actually taken                 {state.opened}"
+        f"   ({captured:.0f}% of them)",
+        f"  signals passed over because slots full   {state.passed_on_full}",
+        "",
+        f"  closed                                   {state.closed}",
+        f"  realised net (THIS ACCOUNT)              Rs {state.realised:+,.2f}",
+        f"  per closed trade                         Rs {per_trade:+,.2f}",
+        f"  snapshot errors                          {state.errors}",
+        "",
+        "  The account figure is what a Rs 20,000 book made. It is NOT the",
+        "  strategy's result: on 2026-10-22 the full signal set returned",
+        "  +Rs 478/signal while the 20% this desk could hold lost Rs 7,738.",
+        "  For the strategy, read the graded ledger below.",
     ]
     if state.by_stance:
         lines += ["", "  BY AGENT STANCE (the question this run exists to ask)"]
@@ -371,9 +419,21 @@ def main() -> int:
                         help="a SEPARATE ledger; never the live one by default")
     parser.add_argument("--dry-run", action="store_true",
                         help="log decisions without recording positions")
-    parser.add_argument("--log", default="logs/paper_desk.log")
+    parser.add_argument("--log", default="",
+                        help="defaults to logs/paper_desk/<session>.log")
     args = parser.parse_args()
 
+    # One file per session, so days ACCUMULATE instead of overwriting each
+    # other. The ledger already accumulates; the log and the summary did not,
+    # and a run that erases yesterday's evidence cannot support the
+    # multi-session comparison that three sessions showed is necessary --
+    # the variance between days is larger than the edge, so one day proves
+    # nothing and only a series can separate luck from signal.
+    from intraday_advisor.ledger.recorder import now_ist
+
+    session = now_ist().date().isoformat()
+    if not args.log:
+        args.log = f"logs/paper_desk/{session}.log"
     Path(args.log).parent.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -400,9 +460,14 @@ def main() -> int:
     report = summarise(state, args.db)
     print(report)
     logging.getLogger("paper_desk").info("\n%s", report)
-    Path(args.log).with_suffix(".summary.json").write_text(
-        json.dumps({"opened": state.opened, "closed": state.closed,
+    Path(args.log).with_suffix(".summary.json").write_text(  # per-session
+        json.dumps({"session": session,
+                    "signals_wanted": len(state.signals_seen),
+                    "opened": state.opened, "closed": state.closed,
+                    "passed_on_full": state.passed_on_full,
                     "realised": state.realised,
+                    "per_trade": round(
+                        state.realised / state.closed, 2) if state.closed else 0,
                     "by_stance": state.by_stance,
                     "errors": state.errors}, indent=1),
         encoding="utf-8",
