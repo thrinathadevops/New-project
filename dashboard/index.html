@@ -401,6 +401,52 @@
     <div id="glossary" class="edge-grid" style="margin-top:14px" hidden></div>
   </section>
 
+  <!-- ============================================================= -->
+  <!-- Per-candle indicator readings, split by measured reliability.  -->
+  <!-- Deliberately the last thing on the page: it is for observing   -->
+  <!-- over days, not for deciding in the next thirty seconds.        -->
+  <!-- ============================================================= -->
+  <section class="card" style="margin-top:22px" aria-label="Indicators that have earned trust">
+    <div class="card__head">
+      <h2 class="card__title">What each indicator says — PROVEN</h2>
+      <span class="tag tag--SAFE" id="sc-trusted-count"></span>
+    </div>
+    <p class="field__hint" id="sc-trusted-note" style="margin-top:-4px"></p>
+    <div class="table-scroll">
+      <table class="data" id="sc-trusted-table">
+        <thead><tr>
+          <th>Indicator</th><th>This candle</th><th>Honest reading</th>
+          <th class="num">Points</th><th class="num">Track record</th>
+          <th class="num">Sessions</th><th>Why it is here</th>
+        </tr></thead>
+        <tbody id="sc-trusted-body"></tbody>
+      </table>
+    </div>
+    <p class="field__hint" id="sc-lean" style="margin-top:10px"></p>
+  </section>
+
+  <section class="card" style="margin-top:16px" aria-label="Indicators not yet proven">
+    <div class="card__head">
+      <h2 class="card__title">What each indicator says — NOT YET PROVEN</h2>
+      <span class="tag tag--muted" id="sc-unproven-count"></span>
+    </div>
+    <p class="field__hint" style="margin-top:-4px">
+      These contribute to the score today and have not held their sign across
+      sessions. Shown so you can watch whether they settle — not so you can act
+      on them.
+    </p>
+    <div class="table-scroll">
+      <table class="data" id="sc-unproven-table">
+        <thead><tr>
+          <th>Indicator</th><th>This candle</th>
+          <th class="num">Points</th><th class="num">Track record</th>
+          <th class="num">Sessions</th><th>Why it is not trusted</th>
+        </tr></thead>
+        <tbody id="sc-unproven-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <p class="field__hint" style="margin-top:22px;text-align:center">
     Decision support, not a profit guarantee. WAIT is a valid and frequent
     output. Estimated data is never actionable and never enters the statistics.

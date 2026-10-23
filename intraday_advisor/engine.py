@@ -175,6 +175,8 @@ class Engine:
     # Carried between snapshots so the fast tick clock can re-price positions
     # without repeating a snapshot's network work. See tick_positions().
     _last_premiums: dict = field(default_factory=dict, repr=False)
+    _scorecard_cache: dict = field(default_factory=dict, repr=False)
+    _scorecard_at: float = field(default=0.0, repr=False)
     _last_directions: dict = field(default_factory=dict, repr=False)
     _regime_fetched_at: float = field(default=0.0, repr=False)
     _agents: Any = field(default=None, repr=False)
@@ -334,6 +336,18 @@ class Engine:
         # scored, so a number on screen is never unexplained ---
         view["readings"] = build_readings(view)
         view["playbook"] = build_playbook(view)
+
+        # What each indicator is saying about THIS candle, paired with whether
+        # that indicator's readings have historically been worth anything.
+        try:
+            from intraday_advisor.indicator_scorecard import live_readings
+
+            view["indicator_readings"] = live_readings(
+                view.get("score_components") or {}, self._scorecard()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Live indicator readings unavailable: %s", exc)
+            view["indicator_readings"] = {"trusted": [], "unproven": []}
 
         # --- record for grading ---
         view["recorded"] = False
@@ -882,6 +896,29 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - a stamp must never break a snapshot
             logger.debug("Could not stamp agent verdict: %s", exc)
 
+
+    def _scorecard(self) -> dict:
+        """Each indicator's track record, recomputed at most every 5 minutes.
+
+        It reads every graded trade and correlates 27 components per session,
+        which is far too much work for a 10-second refresh and changes only
+        when a session is graded -- once a day.
+        """
+        now = time.time()
+        if self._scorecard_cache and (now - self._scorecard_at) < 300:
+            return self._scorecard_cache
+        try:
+            from intraday_advisor.indicator_scorecard import scorecard
+
+            card = scorecard(db_path=self.db_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Scorecard unavailable: %s", exc)
+            card = {"trusted": [], "unproven": [], "sessions": 0,
+                    "note": f"Scorecard unavailable: {exc}"}
+        self._scorecard_cache = card
+        self._scorecard_at = now
+        return card
+
     def _ledger_panel(self) -> dict:
         """Edge measurement for the dashboard, with its honest caveats."""
         try:
@@ -893,6 +930,7 @@ class Engine:
                 "performance": performance,
                 "bands": bands.to_dict("records") if not bands.empty else [],
                 "advice": plain_verdict(performance, self.db_path),
+                "scorecard": self._scorecard(),
                 "auto_grade": _auto_grade_note(self.db_path),
             }
         except Exception as exc:  # noqa: BLE001

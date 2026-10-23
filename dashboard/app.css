@@ -1355,3 +1355,23 @@ td.cell-flash {
    still readable, and no longer the brightest thing competing for a click. */
 .app.is-losing .signals { opacity: 0.72; }
 .app.is-losing .signals:hover { opacity: 1; }
+
+/* ====================================== indicator scorecard windows ===== */
+
+.ind-read      { font-weight: 700; font-size: 11px; letter-spacing: .03em; }
+.ind-read--BULLISH { color: var(--good); }
+.ind-read--BEARISH { color: var(--critical); }
+.ind-read--neutral { color: var(--text-muted); }
+
+/* An inverted indicator's honest reading is the OPPOSITE of what it says, so
+   the two columns disagree on purpose. Marked, or it looks like a bug. */
+.ind-flip {
+  display: inline-block; margin-left: 5px; padding: 1px 5px;
+  border-radius: 4px; font-size: 9px; font-weight: 700; letter-spacing: .04em;
+  background: var(--warning); color: var(--ink-on-light, #0b0b0b);
+  cursor: help;
+}
+.ind-why { color: var(--text-muted); font-size: 11.5px; }
+.ind-rho { font-variant-numeric: tabular-nums; }
+.ind-rho--pos { color: var(--good); }
+.ind-rho--neg { color: var(--critical); }

@@ -542,6 +542,79 @@ function candidatesTable(signal) {
  *  money" behind a CLI, makes trading easier than checking whether trading is
  *  a good idea.
  */
+// ------------------------------------------------- indicator scorecard -----
+
+/** What each indicator says about this candle, split by whether it has
+ *  earned the right to be listened to.
+ *
+ *  The split is measured, not chosen: a component is trusted only when it kept
+ *  the same sign in every session it appeared in. Across 325 graded trades the
+ *  combined 37-component score correlates +0.02 with outcome while its own
+ *  parts reach +/-0.40 -- they disagree, and the sum cancels. That is the
+ *  whole reason these two tables exist separately.
+ */
+function renderScorecard(snapshot) {
+  const body = $('sc-trusted-body');
+  if (!body) return;
+
+  const card = (snapshot.ledger || {}).scorecard || {};
+  const selected = (snapshot.signals || []).find(
+    (s) => s.index === state.selectedIndex) || (snapshot.signals || [])[0];
+  const readings = (selected && selected.indicator_readings) || {};
+  const trusted = readings.trusted || [];
+  const unproven = readings.unproven || [];
+
+  setText($('sc-trusted-count'),
+    `${trusted.length} proven · ${card.sessions || 0} session(s)`);
+  setText($('sc-unproven-count'), `${unproven.length} unproven`);
+  setText($('sc-trusted-note'), card.note || '');
+
+  const rho = (v) => `<span class="ind-rho ${v > 0 ? 'ind-rho--pos'
+    : v < 0 ? 'ind-rho--neg' : ''}">${v > 0 ? '+' : ''}${v.toFixed(3)}</span>`;
+  const read = (v) => `<span class="ind-read ind-read--${v}">${v}</span>`;
+
+  if (!trusted.length) {
+    body.innerHTML = `<tr><td colspan="7" class="empty">${
+      escapeHtml(card.note || 'Nothing has a track record yet.')}</td></tr>`;
+  } else {
+    body.innerHTML = trusted.map((e) => `
+      <tr>
+        <td style="color:var(--text-primary);font-weight:600">${escapeHtml(e.name)}${
+          e.inverted ? '<span class="ind-flip" title="This indicator has been '
+            + 'reliably WRONG: its bullish contribution preceded worse '
+            + 'outcomes in every session. The honest reading is the opposite '
+            + 'of what it says.">INVERTED</span>' : ''}</td>
+        <td>${read(e.says)}</td>
+        <td>${read(e.reading)}</td>
+        <td class="num">${e.points > 0 ? '+' : ''}${e.points}</td>
+        <td class="num">${rho(e.overall)}</td>
+        <td class="num">${e.sessions}</td>
+        <td class="ind-why">${escapeHtml(e.reason || '')}</td>
+      </tr>`).join('');
+  }
+
+  const lean = readings.trusted_lean;
+  setText($('sc-lean'), trusted.length
+    ? `Taking only the proven indicators at their honest reading, this candle `
+      + `leans ${lean} (${readings.trusted_net > 0 ? '+' : ''}${
+        readings.trusted_net}). That is a reading, not a recommendation — `
+      + `nothing here has been shown to make money after costs.`
+    : '');
+
+  const other = $('sc-unproven-body');
+  if (!other) return;
+  other.innerHTML = unproven.length ? unproven.map((e) => `
+      <tr>
+        <td style="color:var(--text-secondary)">${escapeHtml(e.name)}</td>
+        <td>${read(e.says)}</td>
+        <td class="num">${e.points > 0 ? '+' : ''}${e.points}</td>
+        <td class="num">${rho(e.overall)}</td>
+        <td class="num">${e.sessions}</td>
+        <td class="ind-why">${escapeHtml(e.reason || '')}</td>
+      </tr>`).join('')
+    : '<tr><td colspan="6" class="empty">Nothing contributing to this candle.</td></tr>';
+}
+
 function renderVerdict(snapshot) {
   const banner = $('verdict-banner');
   if (!banner) return;
@@ -2403,6 +2476,7 @@ function applySnapshot(snapshot) {
   renderStocks(snapshot);
   renderJournal(snapshot);
   renderGlossary(snapshot);
+  renderScorecard(snapshot);
   renderChartChrome(snapshot);
 
   const selected = snapshot.signals.find((s) => s.index === state.selectedIndex);
