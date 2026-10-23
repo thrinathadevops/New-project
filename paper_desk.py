@@ -58,6 +58,22 @@ NO_NEW_TRADES_BEFORE_CLOSE = 25
 #: while the book is still liquid rather than in the closing scramble.
 FLATTEN_BEFORE_CLOSE = 5
 
+#: Refuse any entry below this premium.
+#:
+#: This project emits Rs 0.50 as a SYNTHETIC floor when the live chain falls
+#: through to estimated pricing -- ``candidates.py`` has rejected premiums at
+#: or below Rs 0.75 for exactly that reason since it was written. This desk
+#: only checked ``entry > 0``, and on 2026-10-23 it "bought" two contracts at
+#: Rs 0.50 and sold them at real prices of Rs 131.85 and Rs 178.95, booking
+#: **Rs 19,957 of fabricated profit -- 79% of the day's reported total**.
+#:
+#: The floor is Rs 5 rather than Rs 0.75 because a tradeable index option is
+#: never worth less than a few rupees: below that it is either a dead far-OTM
+#: strike nobody will fill, or a price the feed invented. Both are things this
+#: desk must decline, and a fabricated fill is far worse than a missed trade --
+#: it is indistinguishable from skill in the ledger afterwards.
+MIN_TRADEABLE_PREMIUM = 5.0
+
 
 @dataclass
 class DeskState:
@@ -74,6 +90,8 @@ class DeskState:
     passed_on_full: int = 0
     #: Distinct contracts the strategy wanted, whether or not they were taken.
     signals_seen: set = field(default_factory=set)
+    #: Entries declined because the quoted premium was a synthetic floor.
+    refused_synthetic: int = 0
 
     def note(self, stance: str, net: float) -> None:
         entry = self.by_stance.setdefault(
@@ -209,6 +227,15 @@ def run_session(
 
         for position in open_now:
             premium, source = _premium_now(position, chain_cache)
+            if premium is not None and premium < MIN_TRADEABLE_PREMIUM:
+                LOG.warning(
+                    "Ignoring a Rs %.2f quote for %s %.0f %s -- below the "
+                    "floor, so it is synthetic. Holding rather than booking a "
+                    "fabricated exit.",
+                    premium, position.index_name, float(position.strike),
+                    position.option_type,
+                )
+                premium = None
             if premium is None:
                 # Loud, because an unpriceable position cannot be exited on its
                 # own terms and will ride to square-off whatever it does.
@@ -295,7 +322,15 @@ def run_session(
                 if not plan.get("affordable"):
                     continue
                 entry = float(sig.get("entry_premium") or 0)
-                if entry <= 0:
+                if entry < MIN_TRADEABLE_PREMIUM:
+                    if entry > 0:
+                        LOG.warning(
+                            "REFUSED %s %.0f %s at Rs %.2f -- below the Rs %.2f "
+                            "floor, so this is a synthetic price, not a quote.",
+                            sig["index"], float(sig["strike"]),
+                            sig["option_type"], entry, MIN_TRADEABLE_PREMIUM,
+                        )
+                        state.refused_synthetic += 1
                     continue
 
                 # Both sides, deliberately: a sample conditioned on the
@@ -375,7 +410,6 @@ def summarise(state: DeskState, db_path: str) -> str:
     from intraday_advisor.positions import session_summary
 
     wanted = len(state.signals_seen)
-    captured = (state.opened / wanted * 100) if wanted else 0.0
     per_trade = (state.realised / state.closed) if state.closed else 0.0
 
     lines = [
@@ -383,9 +417,14 @@ def summarise(state: DeskState, db_path: str) -> str:
         "PAPER SESSION SUMMARY",
         "=" * 68,
         f"  distinct contracts the strategy wanted   {wanted}",
-        f"  positions actually taken                 {state.opened}"
-        f"   ({captured:.0f}% of them)",
+        f"  entries taken                            {state.opened}",
         f"  signals passed over because slots full   {state.passed_on_full}",
+        f"  entries refused as synthetic prices      {state.refused_synthetic}",
+        "",
+        "  Entries can exceed distinct contracts: the desk re-enters the same",
+        "  strike as a move develops. An earlier version divided one by the",
+        "  other and reported '144% of them', which is not a percentage of",
+        "  anything.",
         "",
         f"  closed                                   {state.closed}",
         f"  realised net (THIS ACCOUNT)              Rs {state.realised:+,.2f}",
@@ -415,7 +454,14 @@ def summarise(state: DeskState, db_path: str) -> str:
         lines += ["", f"  ledger today      {today}"]
         report = expectancy_report(db_path=db_path)
         if report.get("trades"):
-            lines += [f"  all-time verdict  {report.get('verdict')}"]
+            lines += [
+                "",
+                f"  THIS DESK's own ledger ({report.get('trades')} trades): "
+                f"{report.get('verdict')}",
+                "  That is the paper desk's file, NOT your live ledger, and it",
+                "  covers only the sessions this desk has run. For the real",
+                "  track record use: python ledger_cli.py sessions",
+            ]
     except Exception:  # noqa: BLE001
         pass
     lines.append("=" * 68)
