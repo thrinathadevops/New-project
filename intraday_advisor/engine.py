@@ -47,7 +47,7 @@ from typing import Any
 
 import pandas as pd
 
-from intraday_advisor.data import drop_forming_candle
+from intraday_advisor.data import drop_forming_candle, parse_interval
 from intraday_advisor.index_options import (
     DEFAULT_STOP_PCT,
     DEFAULT_TARGET_PCT,
@@ -211,9 +211,29 @@ class Engine:
                 setattr(self, key, changes[key])
 
     # ------------------------------------------------------------------ charts
-    def _candles(self, index: str, *, max_age: float = 20.0) -> pd.DataFrame | None:
-        """Underlying candles, cached briefly so a fast refresh loop does not
-        hammer the data source."""
+    def _candles(self, index: str, *, max_age: float | None = None) -> pd.DataFrame | None:
+        """Underlying candles, cached to the BAR, not to a few seconds.
+
+        This cost five trading sessions.
+
+        The TTL was 20 seconds against a 5-minute candle interval -- fifteen
+        times more fetching than the data can possibly change. That was merely
+        wasteful until Yahoo began throttling, at which point a single fetch
+        took **74.6 seconds** measured on 2026-11-02. The cache then expired
+        before every cycle, so each snapshot refetched, each snapshot took
+        ~116s against a 15s refresh, and both the dashboard and the paper desk
+        fell permanently behind. They stayed alive in the process list,
+        recording nothing, for ten days: 26-30 October produced **zero**
+        signals from processes that looked healthy throughout.
+
+        So the TTL now follows the bar. A 5-minute candle cannot change for
+        five minutes, and re-reading it sooner buys nothing at any price.
+        """
+        if max_age is None:
+            # Just under the bar, so a fresh bar is picked up promptly without
+            # the loop ever refetching the same unchanged one.
+            delta = parse_interval(self.interval)
+            max_age = (delta.total_seconds() * 0.8) if delta else 120.0
         fetched = self._chart_fetched_at.get(index, 0.0)
         if index in self._chart_cache and (time.time() - fetched) < max_age:
             return self._chart_cache[index]
