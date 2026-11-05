@@ -54,6 +54,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("dashboard")
 
+# The Angel SDK logs full request headers on any HTTP error, which wrote 135
+# Bearer tokens into logs/ in plaintext before this was installed. Installed at
+# import time, after basicConfig, so it is in place before the first login.
+from intraday_advisor.log_redaction import install as _install_redaction
+
+_install_redaction()
+
 STATIC_DIR = Path(__file__).parent / "dashboard"
 # Only these files are ever served. An allowlist rather than path arithmetic,
 # so there is no traversal surface at all.

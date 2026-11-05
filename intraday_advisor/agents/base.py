@@ -146,6 +146,9 @@ class TradeBrief:
 
     minutes_to_square_off: int | None = None
     days_to_expiry: float | None = None
+    events_today: list[str] = field(default_factory=list)
+    policy_today: bool = False
+    event_calendar_stale: bool = False
     market_open: bool = False
     data_is_live: bool = False
     graded_trades: int = 0
@@ -178,6 +181,18 @@ def timed(func):
         verdict.latency_ms = int((time.perf_counter() - started) * 1000)
         return verdict.clamped(tradable=brief.tradable)
     return wrapper
+
+
+def _event_risk(snapshot: dict) -> dict:
+    """The calendar block, or an empty one.
+
+    Defensive about the type on purpose: ``snapshot["events"]`` already means
+    *position* events and is a list, so a caller passing the wrong block must
+    get an empty mapping rather than an AttributeError from ``.get()`` on a
+    list. The calendar lives under "event_risk" for exactly that reason.
+    """
+    block = snapshot.get("event_risk")
+    return block if isinstance(block, dict) else {}
 
 
 def brief_from_snapshot(
@@ -221,6 +236,10 @@ def brief_from_snapshot(
         range_position=levels.get("range_position"),
         minutes_to_square_off=snapshot.get("minutes_to_square_off"),
         days_to_expiry=(signal.get("volatility") or {}).get("days_to_expiry"),
+        events_today=list(_event_risk(snapshot).get("earnings_today") or []),
+        policy_today=bool(_event_risk(snapshot).get("policy_today")),
+        event_calendar_stale=bool(
+            _event_risk(snapshot).get("stale_policy_list")),
         market_open=bool(snapshot.get("market_open")),
         data_is_live=snapshot.get("mode") == "LIVE",
         graded_trades=int(performance.get("trades") or 0),

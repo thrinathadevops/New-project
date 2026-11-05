@@ -60,7 +60,8 @@ net R:R below 1, cost drag above 5%, one stop-out taking 35%+ of the account,
 fighting an aligned market trend, estimated data, past square-off, **expiry
 day**, or a measured negative expectancy. It **cautions** on contextual
 problems: range regime, high VIX, breadth divergence, global cues against, late
-session, under a day to expiry, or an edge that is still unmeasured.
+session, under a day to expiry, **a heavyweight reporting today**, **an RBI
+policy day**, or an edge that is still unmeasured.
 
 The expiry checks were added on 2026-11-05, and the gap they close is worth
 stating because it had been open the whole time. The checklist knew how many
@@ -71,6 +72,33 @@ that value decays to zero over a few hours whichever way the index goes — and
 because this project sets stops as a **percentage of the premium**, the stop
 then fires on time passing rather than on the trade being wrong. The premium can
 lose 20% with the index flat. That is not a stop; it is a stopwatch.
+
+`event_calendar.py` adds the rest of the calendar, and it is careful about what
+it claims. **A date, never a time:** Yahoo returns earnings timestamps in a US
+timezone for Indian companies -- Reliance's last result reads
+`2026-10-30 10:00-04:00`, which is 19:30 IST, after the close -- so only the
+date is used and the day either side counts as near. It picks the date
+**nearest** today rather than the earliest, because Yahoo's "next earnings date"
+goes stale (TCS still listed 2026-10-08 a month later) and `min()` would pin a
+result that already happened. RBI policy dates are a static list, and when it
+runs out the calendar reports **that**, loudly, instead of reporting "nothing
+scheduled" -- a calendar that silently stops checking is worse than none, so a
+test asserts the list still reaches past today. Events **caution** rather than
+veto: a scheduled event is elevated two-way risk, and a bought option is not
+always on the wrong side of one.
+
+`log_redaction.py` closes a leak rather than adding a check. The Angel SDK logs
+the **entire request headers** on any HTTP error, so one connection timeout
+writes a live session token to disk: **135 Bearer tokens across 10 files** in
+`logs/` when it was measured, the oldest from 16 October. The logging happens
+inside a third-party `except` block, preformatted before it reaches the logger,
+so a `logging.Filter` is the only intervention that survives an SDK upgrade.
+One detail found by testing rather than reading: the SDK logs through
+**logzero**, which installs its own handler and does not propagate to root, so
+attaching the filter to the root logger alone would have missed exactly the
+messages that matter. Existing logs were rewritten in place -- the history is
+the only record of what the system did on those days, and it is the credentials
+that are not worth keeping.
 
 Being deterministic matters more than it sounds: run it twice on the same brief
 and you get the same verdict, so a veto can be argued with rather than obeyed.

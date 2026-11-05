@@ -184,6 +184,34 @@ class RuleAgent:
                     f"stop no longer means what it says."
                 )
 
+        # --- 4c. Is something scheduled to hit this session? -----------------
+        #
+        # NIFTY is cap-weighted, so the day one heavyweight reports is a day the
+        # index can gap on one name, and RBI policy lands mid-session by design.
+        # These CAUTION rather than veto: a scheduled event is elevated two-way
+        # risk, not a structurally unsound trade, and a bought option is not
+        # always on the wrong side of one.
+        if brief.policy_today:
+            cautions.append(
+                "RBI policy decision today. The move usually arrives in one "
+                "burst mid-session and stops set for a normal day are the "
+                "wrong size for it, in both directions."
+            )
+        if brief.events_today:
+            names = ", ".join(brief.events_today)
+            cautions.append(
+                f"{names} reports today. The index is cap-weighted, so one "
+                f"heavyweight's result can move it independently of anything "
+                f"on the chart. A date, not a time — treat the whole session "
+                f"as exposed."
+            )
+        if brief.event_calendar_stale:
+            cautions.append(
+                "The RBI policy date list has run out, so policy days are not "
+                "being checked at all. Update RBI_MPC_DATES — this is a blind "
+                "spot, not an all-clear."
+            )
+
         # --- 5. Is this real? -----------------------------------------------
         if not brief.data_is_live:
             vetoes.append(

@@ -301,6 +301,8 @@ def main() -> int:
         handlers=[logging.FileHandler(args.log, encoding="utf-8"),
                   logging.StreamHandler(sys.stdout)],
     )
+    from intraday_advisor.log_redaction import install as install_redaction
+    install_redaction()
 
     python = sys.executable
     children = [

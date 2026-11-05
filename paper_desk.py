@@ -514,6 +514,12 @@ def main() -> int:
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+    # The Angel SDK logs full request headers on any HTTP error, which put 135
+    # Bearer tokens into logs/ in plaintext before this was installed. Must run
+    # AFTER basicConfig so there are handlers to attach to.
+    from intraday_advisor.log_redaction import install as install_redaction
+    install_redaction()
+
     from intraday_advisor.envfile import load_env
     load_env()
 

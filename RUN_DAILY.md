@@ -46,6 +46,26 @@ refresh the loop can never catch up, which is exactly how 4 November lost
 everything after 11:51. Live tick pricing is worth having back, but it needs
 the per-frame work moved off the stream thread first -- not just the flag.
 
+## What is on the calendar
+
+Checked automatically every session and shown to the agent, so there is nothing
+to run. To see it yourself:
+
+```bash
+python -c "from intraday_advisor.event_calendar import events_for, describe; print(describe(events_for()))"
+```
+
+It knows two things: when an index heavyweight reports, and when RBI policy
+lands. NIFTY is cap-weighted, so one heavyweight's result can move it
+independently of anything on the chart — on 5 November it correctly flagged
+Bharti Airtel reporting that day. Both **caution**, they do not veto: a
+scheduled event is elevated two-way risk, not an unsound trade.
+
+**The RBI dates are a static list in `event_calendar.py` and need updating once
+a year.** When the list runs out the calendar says so loudly instead of
+reporting "nothing scheduled", and a test fails to remind you — a calendar that
+quietly stops checking is worse than no calendar.
+
 ## Before you take a trade
 
 ```bash

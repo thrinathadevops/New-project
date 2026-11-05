@@ -434,6 +434,32 @@ class Engine:
             logger.warning("Stock scan failed: %s", exc)
             return {"rows": [], "error": str(exc)[:200]}
 
+    # ------------------------------------------------------------ event risk
+    def _events(self) -> dict:
+        """Scheduled events around today, cached for the session.
+
+        Once per day, not once per refresh: a results date does not change
+        inside a session, and the fetch is twelve network calls. Never raises --
+        a calendar that takes the desk down is worse than no calendar, and a
+        failure is reported as a failure rather than as "nothing scheduled".
+        """
+        from intraday_advisor.event_calendar import events_for
+
+        today = now_ist().date().isoformat()
+        cached = getattr(self, "_event_cache", None)
+        if cached and cached[0] == today:
+            return cached[1]
+        try:
+            payload = events_for().as_dict()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Event calendar failed: %s", exc)
+            payload = {"events": [], "earnings_today": [],
+                       "policy_today": False, "stale_policy_list": False,
+                       "degraded": True,
+                       "note": f"Event calendar unavailable: {exc}"}
+        self._event_cache = (today, payload)
+        return payload
+
     # -------------------------------------------------------------- premarket
     def _premarket(self, market_session) -> dict:
         """Today's news brief, built once per trading day.
@@ -791,6 +817,7 @@ class Engine:
             "mode": "LIVE" if any(s.get("is_live") for s in signals) else "ESTIMATED",
             "market_open": is_market_open(),
             "minutes_to_square_off": minutes_to_square_off(),
+            "event_risk": self._events(),
         }
         for signal in signals:
             # Key on what actually changes the answer. Without this an LLM
@@ -869,6 +896,7 @@ class Engine:
             "signals": signals,
             "positions": positions,
             "events": [event.as_dict() for event in events],
+            "event_risk": snapshot_so_far["event_risk"],
             "session": {
                 **session,
                 "open_pnl": open_pnl,
