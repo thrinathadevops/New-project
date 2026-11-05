@@ -471,18 +471,62 @@ def parse_book(
 # Time of day
 # --------------------------------------------------------------------------- #
 
-def spread_multiplier_at(moment, shape: dict | None = None) -> dict:
+def measured_shape(*, db_path=None) -> dict | None:
+    """This account's own spread shape from the archive, or None.
+
+    Returns None rather than a prior so a caller can tell "nothing measured
+    yet" from "measured and it matches the prior". Never raises: a missing
+    archive must leave the cost model working on the published shape.
+    """
+    if db_path is None:
+        return None
+    try:
+        from intraday_advisor.calibration import spread_shape
+
+        result = spread_shape(db_path=db_path)
+        if result.get("basis") != "calibrated" or not result.get("measured_hours"):
+            return None
+        return {row["hour"]: row["measured"] for row in result.get("rows", [])
+                if row.get("source") == "measured" and row.get("measured")}
+    except Exception:  # noqa: BLE001 - the cost model must not depend on this
+        return None
+
+
+def spread_multiplier_at(moment, shape: dict | None = None, *,
+                         db_path=None) -> dict:
     """How expensive is the book at this hour, relative to a typical one?
 
     ``moment`` is anything with ``.hour`` (a ``datetime``, ``time``, or
     ``pandas.Timestamp``) in IST.
 
-    The returned ``basis`` is always ``"prior"`` unless you pass a ``shape``
-    you calibrated yourself, because the shape is read off published research
-    rather than off your fills. A number whose provenance is invisible is how
-    the 0.25% constant survived six sessions unexamined.
+    ``basis`` says where the number came from, and that is not decoration. The
+    shape starts as published research rather than your fills, and a number
+    whose provenance is invisible is how the 0.25% constant survived six
+    sessions unexamined.
+
+    Pass ``db_path`` and the archive's **measured** shape is used for any hour
+    with enough samples, falling back to the prior for the rest. The switch is
+    automatic but never silent: ``basis`` reads ``"measured"`` for that hour,
+    ``samples`` says how many observations stand behind it, and the day an hour
+    first crosses the threshold is logged and written into that day's record.
+    An explicit ``shape`` still wins, for tests and for what-ifs.
     """
-    table = shape or SPREAD_SHAPE_BY_HOUR
+    # Three distinct provenances, and collapsing any two of them would hide
+    # something: "prior" is published research, "measured" is this account's
+    # own book from the archive, and "calibrated" is a shape the caller passed
+    # for a test or a what-if. Only the middle one is evidence about you.
+    from_archive = shape is None
+    live = shape if shape is not None else measured_shape(db_path=db_path)
+    basis_label = "measured" if from_archive else "calibrated"
+    table = dict(SPREAD_SHAPE_BY_HOUR)
+    measured_at: set = set()
+    if live:
+        for hour, value in live.items():
+            try:
+                table[int(hour)] = float(value)
+                measured_at.add(int(hour))
+            except (TypeError, ValueError):
+                continue
     hour = getattr(moment, "hour", None)
     if hour is None:
         raise TypeError("moment must expose an .hour attribute")
@@ -494,7 +538,7 @@ def spread_multiplier_at(moment, shape: dict | None = None) -> dict:
         return {
             "hour": hour,
             "multiplier": table[nearest],
-            "basis": "prior",
+            "basis": basis_label if nearest in measured_at else "prior",
             "in_session": False,
             "note": (
                 f"{hour:02d}:00 is outside the 09:15-15:30 session; used the "
@@ -518,10 +562,16 @@ def spread_multiplier_at(moment, shape: dict | None = None) -> dict:
     else:
         note = f"{hour:02d}:00 is between the open and the midday trough."
 
+    from_book = hour in measured_at
+    if from_book and from_archive:
+        note = (
+            f"{note} This hour's figure is **measured from your own book**, "
+            f"not the published prior."
+        )
     return {
         "hour": hour,
         "multiplier": multiplier,
-        "basis": "prior" if shape is None else "calibrated",
+        "basis": basis_label if from_book else "prior",
         "in_session": True,
         "note": note,
     }

@@ -121,6 +121,41 @@ class Assessment:
 
 # ================================================================= the pool ==
 
+def pool_bars(symbol: str, *, db_path=None, interval: str = "5m",
+              period: str = "60d"):
+    """Candles for the replay pool: the archive first, the live source second.
+
+    This is why the archive exists. Yahoo serves roughly 60 days of 5-minute
+    history, so a pool built from it can never grow -- it slides. The archive
+    accumulates, so the pool deepens with every session recorded, and a replay
+    run next year draws on a sample the source stopped serving months earlier.
+
+    Falls back to a live fetch when the archive holds less than the source
+    would, so this is never worse than before.
+    """
+    archived = None
+    if db_path is not None:
+        try:
+            from intraday_advisor.archive import stored_bars
+
+            archived = stored_bars(symbol, db_path=db_path, interval=interval)
+        except Exception:  # noqa: BLE001 - the archive is an optimisation
+            archived = None
+
+    archived_sessions = 0
+    if archived is not None and not archived.empty:
+        archived_sessions = len({str(x)[:10] for x in archived.index})
+    if archived_sessions >= MIN_SESSIONS:
+        return archived
+
+    try:
+        from intraday_advisor.data import fetch_yahoo_ohlcv
+
+        return fetch_yahoo_ohlcv(symbol, period=period, interval=interval)
+    except Exception:  # noqa: BLE001
+        return archived
+
+
 def session_blocks(bars, *, min_sessions: int = MIN_SESSIONS) -> list[list[tuple]]:
     """Past sessions as per-bar ratios to the previous close.
 
@@ -399,9 +434,9 @@ def assess(
             f"the stop or the target."
         )
     result.notes.append(
-        "Costs are charged at the real premium and lot size. The replay is "
-        "built from the last 60 days of this index and cannot know about a day "
-        "unlike them."
+        f"Costs are charged at the real premium and lot size. The replay is "
+        f"built from {result.odds.sessions_in_pool} past session(s) of this "
+        f"index and cannot know about a day unlike them."
     )
     return result
 

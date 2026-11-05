@@ -225,6 +225,109 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def cmd_archive(args) -> int:
+    """Store today's candles, build any outstanding daily record, show coverage."""
+    from intraday_advisor.archive import (
+        archive_due,
+        bar_coverage,
+        render_coverage,
+    )
+
+    summary = archive_due(args.db, with_bars=not args.no_bars)
+    written = sum((summary.get("bars") or {}).values())
+    print(f"bars written      : {written:,}")
+    print(f"records built     : {summary.get('recorded') or 'none'}")
+    for deferred in summary.get("deferred", []):
+        print(f"  deferred {deferred['session']}: {deferred['reason']}")
+    for error in summary.get("errors", []):
+        print(f"  ERROR {error}")
+    print()
+    print(render_coverage(bar_coverage(db_path=args.db)))
+    return 0
+
+
+def cmd_agent(args) -> int:
+    """Would the vetoed trades have made money?"""
+    from intraday_advisor.calibration import agent_scorecard, render_agent
+
+    print(render_agent(agent_scorecard(db_path=args.db)))
+    return 0
+
+
+def cmd_spreads(args) -> int:
+    """Measured half-spread by hour against the published prior."""
+    from intraday_advisor.calibration import render_spreads, spread_shape
+
+    print(render_spreads(spread_shape(db_path=args.db)))
+    return 0
+
+
+def cmd_calibration(args) -> int:
+    """Is conviction a probability, and do stated odds happen?"""
+    from intraday_advisor.calibration import (
+        conviction_calibration,
+        odds_reliability,
+        render_conviction,
+        render_reliability,
+        volatility_history,
+    )
+
+    print(render_conviction(conviction_calibration(db_path=args.db)))
+    print()
+    print(render_reliability(odds_reliability(db_path=args.db)))
+    print()
+    history = volatility_history(db_path=args.db)
+    print("=" * 68)
+    print(f"REALISED VOLATILITY HISTORY  ({history.get('symbol')})")
+    print("=" * 68)
+    print(f"  sessions : {history.get('sessions', 0)}")
+    if history.get("forecast"):
+        forecast = history["forecast"]
+        print(f"  HAR-RV next-day forecast : {forecast}")
+    if history.get("note"):
+        print(f"    - {history['note']}")
+    for note in history.get("notes", []):
+        print(f"    - {note}")
+    print("=" * 68)
+    return 0
+
+
+def cmd_day(args) -> int:
+    """One day's consolidated record, or the last few side by side."""
+    import json as _json
+
+    from intraday_advisor.archive import daily_records
+
+    rows = daily_records(db_path=args.db, limit=args.limit)
+    if not rows:
+        print("No daily records yet. Run `ledger_cli.py archive` after a session.")
+        return 0
+    if args.session:
+        rows = [r for r in rows if r["session_date"] == args.session]
+        if not rows:
+            print(f"No record for {args.session}.")
+            return 0
+        print(_json.dumps(rows[0], indent=2, default=str))
+        return 0
+
+    print("=" * 94)
+    print("DAILY RECORDS  (one row per session — the table days are compared across)")
+    print("=" * 94)
+    print(f"  {'session':12} {'sig':>5} {'live':>5} {'graded':>7} "
+          f"{'P&L/lot':>9} {'conv':>6} {'vix':>6} {'r.vol':>7} {'move%':>7} {'bars':>6}")
+    for row in rows:
+        def show(key, fmt="{:>6}"):
+            value = row.get(key)
+            return fmt.format("-" if value is None else value)
+        print(f"  {row['session_date']:12} {row.get('signals_total') or 0:5} "
+              f"{row.get('signals_live') or 0:5} {row.get('graded') or 0:7} "
+              f"{show('net_pnl_per_lot', '{:>9}')} {show('mean_conviction')} "
+              f"{show('mean_vix')} {show('realised_vol', '{:>7}')} "
+              f"{show('spot_move_pct', '{:>7}')} {row.get('bars_archived') or 0:6}")
+    print("=" * 94)
+    return 0
+
+
 def cmd_odds(args) -> int:
     """Forward odds on one trade, with its costs charged.
 
@@ -254,10 +357,16 @@ def cmd_odds(args) -> int:
     u_target = args.u_target
 
     try:
-        bars = fetch_yahoo_ohlcv(INDEX_CONFIG[index]["yahoo"],
-                                 period="60d", interval="5m")
+        # Archive first: it accumulates, where Yahoo's 60-day window slides.
+        from intraday_advisor.forward_odds import pool_bars
+
+        bars = pool_bars(INDEX_CONFIG[index]["yahoo"], db_path=args.db,
+                         interval="5m", period="60d")
     except Exception as exc:  # noqa: BLE001
         print(f"Could not fetch {index} candles: {exc}")
+        return 1
+    if bars is None or len(bars) == 0:
+        print(f"No candles available for {index}.")
         return 1
     if spot is None:
         spot = float(bars["Close"].iloc[-1])
@@ -512,6 +621,29 @@ def main(argv=None) -> int:
     costs.add_argument("--target", type=float, default=0.25,
                        help="target move as a fraction (default 0.25)")
     costs.set_defaults(func=cmd_costs)
+
+    archive = subparsers.add_parser(
+        "archive", help="store today's candles and build the daily record")
+    archive.add_argument("--no-bars", action="store_true",
+                         help="build records only, skip the candle fetch")
+    archive.set_defaults(func=cmd_archive)
+
+    agent = subparsers.add_parser(
+        "agent", help="would the vetoed trades have made money?")
+    agent.set_defaults(func=cmd_agent)
+
+    spreads = subparsers.add_parser(
+        "spreads", help="measured half-spread by hour vs the prior")
+    spreads.set_defaults(func=cmd_spreads)
+
+    calibration = subparsers.add_parser(
+        "calibration", help="is conviction a probability? do stated odds happen?")
+    calibration.set_defaults(func=cmd_calibration)
+
+    day = subparsers.add_parser("day", help="daily records, side by side")
+    day.add_argument("--session", help="one session date, as JSON")
+    day.add_argument("--limit", type=int, default=30)
+    day.set_defaults(func=cmd_day)
 
     odds = subparsers.add_parser(
         "odds", help="forward odds on one trade, with costs charged")

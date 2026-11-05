@@ -206,6 +206,20 @@ class Broadcaster:
                 summary = await asyncio.to_thread(
                     auto_grade.grade_due, self.engine.db_path
                 )
+                # The daily archive rides the grader's schedule rather than
+                # adding a second one: same 15:45 settling logic, same bounded
+                # catch-up, so a day missed to a crash or a sleeping machine is
+                # recovered on the next pass instead of lost.
+                try:
+                    from intraday_advisor import archive
+
+                    archived = await asyncio.to_thread(
+                        archive.archive_due, self.engine.db_path
+                    )
+                    for session in archived.get("recorded", []):
+                        logger.info("Daily record built for %s", session)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Archive pass failed: %s", exc)
                 for entry in summary.get("graded", []):
                     logger.info(
                         "Auto-graded %s: %s signal(s) %s",

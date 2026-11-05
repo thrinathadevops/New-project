@@ -97,6 +97,38 @@ Pass `--u-stop` and `--u-target` with the levels off your chart. Without them
 the underlying levels are derived from the premium percentages, which is crude
 and the command says so: an option moves several times its underlying.
 
+## The daily store
+
+Automatic — it rides the grader's schedule, so there is nothing to run. After
+15:45 the dashboard archives the day's candles and writes one consolidated
+record per session. A day missed to a crash or a sleeping machine is caught up
+on the next pass.
+
+```bash
+python ledger_cli.py archive      # run it by hand, and show coverage
+python ledger_cli.py day          # every session, side by side
+```
+
+**Why candles are archived at all:** Yahoo serves roughly 60 days of 5-minute
+history, so every day that passes destroyed a day permanently. Nothing kept
+them. The first backfill captured **61,600 bars across 60 sessions for 14
+symbols** — everything still recoverable. From here the archive grows while the
+source slides, and `ledger_cli odds` draws on it rather than the 60-day window.
+
+What the day record makes answerable, which nothing could before:
+
+```bash
+python ledger_cli.py agent        # would the vetoed trades have made money?
+python ledger_cli.py spreads      # measured half-spread by hour vs the prior
+python ledger_cli.py calibration  # is conviction a probability? do odds happen?
+```
+
+**The spread shape switches to your own book automatically** once an hour has
+10 samples. It is automatic but not silent: every cost figure carries whether
+it came from `measured` or `prior`, and the day an hour flips is logged and
+written into that day's record, so a changed verdict is always traceable to a
+date.
+
 ## Any time after the close
 
 ```bash

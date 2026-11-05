@@ -283,6 +283,100 @@ CREATE TABLE IF NOT EXISTS observations (
 
 CREATE INDEX IF NOT EXISTS idx_obs_session ON observations(session_date);
 
+-- ----------------------------------------------------------------- archive
+-- Raw candles, kept because they expire at the source.
+--
+-- Yahoo serves roughly 60 days of 5-minute history, so every day that passes
+-- destroys a day permanently. `data.store_ohlcv_sqlite` existed for this and
+-- had zero callers, which meant the one piece of data that cannot be rebuilt
+-- later at any price was the one piece nobody kept.
+--
+-- `bar_time` is the CANONICAL IST string from `recorder.canonical_bar_time`.
+-- Storing the raw index repr is exactly the bug that duplicated about half of
+-- three sessions in `signals`: the same bar arrives spelled UTC or IST
+-- depending on which fetch answered, and a primary key over the raw string
+-- silently stops deduplicating.
+CREATE TABLE IF NOT EXISTS bars (
+    symbol          TEXT NOT NULL,
+    bar_time        TEXT NOT NULL,
+    interval        TEXT NOT NULL,
+    session_date    TEXT NOT NULL,
+    open            REAL NOT NULL,
+    high            REAL NOT NULL,
+    low             REAL NOT NULL,
+    close           REAL NOT NULL,
+    volume          REAL,
+    PRIMARY KEY (symbol, bar_time, interval)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bars_session ON bars(session_date, symbol);
+CREATE INDEX IF NOT EXISTS idx_bars_symbol  ON bars(symbol, interval, bar_time);
+
+-- Measured half-spreads, one row per contract observation.
+--
+-- `microstructure.cost_model_from_book` derives this from live depth on every
+-- refresh and it was discarded every time, so the cost model -- the number
+-- that decides every veto, breakeven and cost-drag figure -- ran on the
+-- published NSE prior instead of this account's own book.
+CREATE TABLE IF NOT EXISTS spread_samples (
+    observed_at     TEXT NOT NULL,
+    session_date    TEXT NOT NULL,
+    index_name      TEXT NOT NULL,
+    tradingsymbol   TEXT NOT NULL,
+    hour            INTEGER,
+    half_spread_pct REAL NOT NULL,
+    premium         REAL,
+    measured        INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (observed_at, tradingsymbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_spread_hour ON spread_samples(hour);
+CREATE INDEX IF NOT EXISTS idx_spread_session ON spread_samples(session_date);
+
+-- One consolidated row per trading day: what kind of day was it, what did the
+-- system do, and what was it running on. The question "what was different
+-- about the day that worked" needs one row per day to compare, not a scan.
+CREATE TABLE IF NOT EXISTS daily_record (
+    session_date      TEXT PRIMARY KEY,
+    built_at          TEXT NOT NULL,
+    regimes           TEXT,
+    mean_conviction   REAL,
+    mean_vix          REAL,
+    mean_breadth      REAL,
+    realised_vol      REAL,
+    spot_move_pct     REAL,
+    spot_range_pct    REAL,
+    per_index         TEXT,
+    signals_total     INTEGER,
+    signals_live      INTEGER,
+    graded            INTEGER,
+    net_pnl_per_lot   REAL,
+    hit_target        INTEGER,
+    stances           TEXT,
+    events            TEXT,
+    measured_hours    TEXT,
+    bars_archived     INTEGER,
+    note              TEXT
+);
+
+-- Predictions with their realised outcome, so a stated probability can be
+-- checked against what happened. AGENTS.md: conviction "is agreement among
+-- inputs, not a probability of being right... only the ledger can estimate
+-- it." This is the table that lets the ledger estimate it.
+CREATE TABLE IF NOT EXISTS predictions (
+    made_at         TEXT NOT NULL,
+    session_date    TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    index_name      TEXT NOT NULL,
+    predicted       REAL NOT NULL,
+    payload         TEXT,
+    realised        REAL,
+    resolved_at     TEXT,
+    PRIMARY KEY (made_at, kind, index_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_pred_kind ON predictions(kind, session_date);
+
 -- --------------------------------------------------------------- reporting
 -- Signals joined to outcomes, synthetic data excluded. Every report reads
 -- this rather than re-deriving the join (and re-forgetting the filter).
@@ -341,6 +435,12 @@ ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("agent_stance", "TEXT"),
         ("agent_provider", "TEXT"),
         ("agent_degraded", "INTEGER"),
+    ],
+    "daily_record": [
+        # Per-index spot moves. The scalar `spot_move_pct` columns are NIFTY's;
+        # this keeps BANKNIFTY rather than discarding it, and exists because
+        # pooling the two produced a -57% "move" on a flat day.
+        ("per_index", "TEXT"),
     ],
 }
 

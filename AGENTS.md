@@ -286,6 +286,57 @@ Worth doing in that order. Worth doing once the free ones have
 shown whether the LLM layer adds anything the checklist does not: if a local
 model and the rules always agree, paying for a better model buys nothing.
 
+## The daily store, and why it is not a data landfill
+
+`archive.py` writes four things once a day; `calibration.py` reads all four.
+Nothing is stored without a named consumer, because storage without one is a
+landfill that feels like progress.
+
+**The candles are the urgent part.** Yahoo serves roughly 60 days of 5-minute
+history, so every day that passed destroyed a day permanently.
+`data.store_ohlcv_sqlite` existed for exactly this and had **zero callers** --
+the one piece of data that cannot be rebuilt later at any price was the one
+piece nobody kept. The first backfill took 61,600 bars across 60 sessions for
+14 symbols, everything still recoverable. `forward_odds` now draws its replay
+pool from the archive, so the pool deepens with every session instead of
+sliding with the source.
+
+**The spreads were the expensive part.** `cost_model_from_book` measured the
+half-spread from live depth on every refresh and threw it away, so the cost
+model -- the number that decides every veto, breakeven and cost-drag figure --
+ran on the published NSE prior rather than this account's own book. Samples now
+accumulate, and an hour switches to measured at ten of them. That switch is
+**automatic but not silent**: `basis` reads `measured`, `prior` or `calibrated`
+(a caller's what-if), and the day an hour flips is logged and written into that
+day's record, so a verdict that changed can always be traced to a date.
+
+**The questions it makes answerable** were answerable in principle for weeks
+and nothing asked them:
+
+- `ledger_cli agent` -- would the vetoed trades have made money? As of
+  2026-11-05: 272 graded vetoes averaging Rs -312/lot against Rs -674 for
+  unruled rows. The honest reading is the one it prints: **every** graded signal
+  was vetoed, so there is no approved group to compare against and the veto
+  cannot be scored yet, only observed to have been pointed at losing trades.
+- `ledger_cli calibration` -- AGENTS.md says conviction "is agreement among
+  inputs, not a probability of being right... only the ledger can estimate it."
+  This estimates it. It currently reports nothing, and says why: the one
+  observed session finished flat, and a flat day confirms no directional call
+  either way.
+- `ledger_cli day` -- one row per session. On its first run it showed the two
+  positive sessions were the two highest-realised-volatility sessions
+  (14.5% and 14.3% against 8.9-11.5% on every losing day). Measured properly
+  that is **Spearman +0.48, exact permutation p = 0.24 on 8 sessions** -- not
+  significant, and reported as a tracked hypothesis rather than a finding.
+
+Three things this cost, all of them bugs found by running it rather than by
+reading it: pooling two indices' spot series reported a **-57% move on a flat
+day** (NIFTY at ~24,500 and BANKNIFTY at ~57,800 in one series);
+`Series.tz_convert` instead of `.dt.tz_convert` silently emptied every
+realised-volatility figure; and a flat day scored as a **miss for both
+directions**, which made conviction read 0% in every band. The first and second
+now have regression tests.
+
 ## What this does and does not buy you
 
 It does not make a losing strategy profitable, and it does not know which way

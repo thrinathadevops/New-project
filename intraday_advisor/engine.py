@@ -340,6 +340,19 @@ class Engine:
                 index, spot=signal.spot or 0,
                 expiry=self.expiries.get(index.upper()),
             )
+            # The measured half-spread is in this frame and was discarded on
+            # every refresh, which is why the cost model ran on the published
+            # prior instead of this account's own book. One cheap write, no
+            # extra network call.
+            if self.record:
+                try:
+                    from intraday_advisor.archive import record_chain_spreads
+
+                    record_chain_spreads(chain, db_path=self.db_path,
+                                         index_name=index)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Spread sample not recorded: %s", exc)
+
             view["candidates"] = build_candidates(
                 index, chain, direction=signal.direction,
                 available_capital=self.available_capital,
