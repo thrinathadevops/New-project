@@ -53,6 +53,10 @@ GRACE_SECONDS = 180.0
 #: not become a fork bomb.
 MIN_RESTART_INTERVAL = 60.0
 
+#: A poll that arrives this many times later than scheduled means the machine
+#: was suspended, not that the loop ran slowly.
+SUSPEND_FACTOR = 3.0
+
 
 @dataclass
 class Child:
@@ -74,13 +78,33 @@ class Child:
 
 
 def _signal_count(db_path: str) -> int:
-    """How many signals the ledger holds. The proof-of-work for a recorder."""
+    """Proof that a child is still working: how many market samples it holds.
+
+    This counts ``observations``, not ``signals``, and the difference cost a
+    day of needless restarts.
+
+    A signal row is written only when the engine proposes a CALL or a PUT. On a
+    day it declines to trade -- which is most hours of most days, and exactly
+    what it is supposed to do when nothing qualifies -- the signal count does
+    not move at all. Using it as a heartbeat meant "working correctly and
+    finding nothing" was indistinguishable from "stalled", and on 2026-11-05
+    this supervisor restarted both children **nine times** on that mistake.
+
+    ``observations`` is written every cycle regardless of the verdict, so it
+    beats even when the answer is no. Signals are kept as a fallback for a
+    ledger too old to have the table, since a missing table must not read as a
+    dead process.
+    """
     try:
         from intraday_advisor.ledger.schema import connect
 
         with connect(db_path) as conn:
-            row = conn.execute("SELECT COUNT(*) FROM signals").fetchone()
-            return int(row[0]) if row else 0
+            try:
+                row = conn.execute("SELECT COUNT(*) FROM observations").fetchone()
+                return int(row[0]) if row else 0
+            except Exception:  # noqa: BLE001 - no table yet; fall back
+                row = conn.execute("SELECT COUNT(*) FROM signals").fetchone()
+                return int(row[0]) if row else 0
     except Exception:  # noqa: BLE001 - a locked DB is not a stall
         return -1
 
@@ -152,9 +176,61 @@ def check(child: Child, *, now: float, market_open: bool) -> str | None:
     if quiet > QUIET_SECONDS:
         return (
             f"alive but silent for {quiet / 60:.0f} min during market hours "
-            f"(ledger stuck at {count} signals)"
+            f"(ledger stuck at {count} market samples)"
         )
     return None
+
+
+#: Windows SetThreadExecutionState flags. ES_SYSTEM_REQUIRED keeps the machine
+#: from sleeping; ES_CONTINUOUS makes that persist until it is cleared.
+#: Deliberately NOT ES_DISPLAY_REQUIRED -- the screen may sleep, the CPU may not.
+_ES_CONTINUOUS = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def keep_awake(enable: bool = True) -> bool:
+    """Ask Windows not to sleep while the desk is running. Returns success.
+
+    The right scope for this is the process that needs it, not the machine's
+    global power policy. On 2026-11-05 this laptop slept 09:41 to 12:37 IST and
+    the first half of the session was lost. The AC setting was already "never
+    sleep" -- it slept because it was on **battery**, where the idle timeout is
+    five minutes.
+
+    Setting the battery timeout to never would fix that session and flatten the
+    battery on every other day. So the request is held for exactly as long as
+    the supervisor runs and released when it exits: awake while recording,
+    normal power behaviour the rest of the time.
+
+    The display is deliberately left alone. Keeping the screen on all session
+    wastes power and is not what was needed -- the CPU was.
+    """
+    try:
+        import ctypes
+
+        state = (_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED) if enable else _ES_CONTINUOUS
+        # Returns the previous state, or 0 on failure.
+        return bool(ctypes.windll.kernel32.SetThreadExecutionState(state))
+    except Exception:  # noqa: BLE001 - not Windows, or the call is unavailable
+        return False
+
+
+def suspended_for(now: float, expected: float, poll: float) -> float:
+    """Seconds the machine was suspended, or 0.0 if it just ran late.
+
+    A sleeping laptop is invisible from inside the loop: ``time.sleep(60)``
+    returns three hours later and every child looks like it stalled. On
+    2026-11-05 this machine slept 09:41 to 12:37 IST and the entire first half
+    of the session was lost -- not to any defect, and not to anything a restart
+    could have fixed.
+
+    So an unexplained jump in the wall clock is reported as what it is. The
+    children are exonerated (their quiet clocks reset) and the gap is logged in
+    minutes of **market** data, because that is the number that matters and
+    nothing else in the system was in a position to notice it.
+    """
+    late = now - expected
+    return late if late > poll * SUSPEND_FACTOR else 0.0
 
 
 def supervise(children: list[Child], *, poll: float = 60.0,
@@ -163,9 +239,23 @@ def supervise(children: list[Child], *, poll: float = 60.0,
         start(child)
     try:
         while True:
+            scheduled = time.time() + poll
             time.sleep(poll)
             now = time.time()
             market_open = _market_open()
+            slept = suspended_for(now, scheduled, poll)
+            if slept:
+                LOG.warning(
+                    "the machine was suspended for %.0f min%s — no process "
+                    "could have recorded anything through that, and a restart "
+                    "would not have helped",
+                    slept / 60,
+                    " DURING MARKET HOURS" if market_open else "",
+                )
+                for child in children:
+                    child.last_progress = now
+                    child.started_at = max(child.started_at, now - GRACE_SECONDS)
+                continue
             for child in children:
                 reason = check(child, now=now, market_open=market_open)
                 if not reason:
@@ -198,6 +288,9 @@ def main() -> int:
     parser.add_argument("--poll", type=float, default=60.0)
     parser.add_argument("--no-dashboard", action="store_true")
     parser.add_argument("--log", default="logs/supervisor.log")
+    parser.add_argument("--allow-sleep", action="store_true",
+                        help="do not hold the machine awake (a suspend then "
+                             "loses the session's data silently)")
     args = parser.parse_args()
 
     Path(args.log).parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +326,19 @@ def main() -> int:
 
     LOG.info("supervising %d process(es); quiet threshold %.0f min",
              len(children), QUIET_SECONDS / 60)
-    supervise(children, poll=args.poll)
+    if args.allow_sleep:
+        LOG.info("sleep request NOT held (--allow-sleep); a suspend will cost "
+                 "you the data for as long as it lasts")
+    elif keep_awake(True):
+        LOG.info("holding the machine awake while this runs (display may "
+                 "still sleep); released on exit")
+    else:
+        LOG.warning("could not ask the system to stay awake — if this machine "
+                    "sleeps mid-session that data is simply gone")
+    try:
+        supervise(children, poll=args.poll)
+    finally:
+        keep_awake(False)
     return 0
 
 

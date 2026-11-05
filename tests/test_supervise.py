@@ -64,7 +64,7 @@ def test_an_alive_but_silent_child_is_restarted_during_market_hours(ledger):
     reason = check(kid, now=QUIET_SECONDS + GRACE_SECONDS + 1, market_open=True)
     assert reason is not None
     assert "silent" in reason
-    assert "100 signals" in reason, "the reason must name the evidence"
+    assert "100 market samples" in reason, "the reason must name the evidence"
 
 
 def test_a_child_that_is_still_recording_is_left_alone(ledger):
@@ -118,6 +118,41 @@ def test_an_unreadable_ledger_is_not_evidence_of_a_stall(monkeypatch):
     kid = child(count=100)
     assert check(kid, now=QUIET_SECONDS + GRACE_SECONDS + 1,
                  market_open=True) is None
+
+
+def test_liveness_counts_market_samples_not_signals(tmp_path):
+    """The fix for nine needless restarts on 2026-11-05.
+
+    A signal row is written only for a CALL or a PUT, so a process working
+    correctly and declining to trade looked identical to a stalled one.
+    `observations` is written every cycle, whatever the verdict.
+    """
+    from intraday_advisor.ledger.schema import connect, init_ledger
+    from supervise import _signal_count
+
+    db = str(tmp_path / "ledger.sqlite")
+    init_ledger(db)
+    assert _signal_count(db) == 0
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO observations (observed_at, session_date, index_name, "
+            "spot) VALUES ('2026-11-05T10:00:00+05:30', '2026-11-05', "
+            "'NIFTY', 22700)")
+        conn.commit()
+    assert _signal_count(db) == 1, (
+        "an observation with no signal must still count as progress")
+
+
+def test_a_long_clock_jump_is_read_as_the_machine_sleeping(caplog):
+    """On 2026-11-05 this machine slept 09:41 to 12:37 IST. From inside the
+    loop that is indistinguishable from a stalled child unless it is checked
+    for, and restarting cannot fix it."""
+    from supervise import SUSPEND_FACTOR, suspended_for
+
+    assert suspended_for(1000.0 + 5, 1000.0, 60.0) == 0.0
+    assert suspended_for(1000.0 + 60 * SUSPEND_FACTOR - 1, 1000.0, 60.0) == 0.0
+    slept = suspended_for(1000.0 + 10_800, 1000.0, 60.0)
+    assert slept == pytest.approx(10_800)
 
 
 def test_the_quiet_threshold_is_longer_than_a_slow_snapshot():

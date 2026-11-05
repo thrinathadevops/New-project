@@ -46,6 +46,37 @@ refresh the loop can never catch up, which is exactly how 4 November lost
 everything after 11:51. Live tick pricing is worth having back, but it needs
 the per-frame work moved off the stream thread first -- not just the flag.
 
+## Before you take a trade
+
+```bash
+python ledger_cli.py odds --premium 194 --index NIFTY --bars-left 40
+```
+
+This is the only command that answers "what are the odds on **this** trade",
+rather than "does this rule have an edge". It replays the rest of the session
+10,000 times from the index's own last 60 days, re-runs the same stop and
+target on those 60 real sessions, and compares the result against the win rate
+the **costs** demand.
+
+That last comparison is the point. Measured on a real NIFTY setup:
+
+```
+                         Rs 194 premium      Rs 12 premium
+replay hit rate              47.4%               47.0%
+needs to win after costs     46.8%               58.3%
+edge                        +0.6 points        -11.4 points
+verdict                   coin flip          ODDS AGAINST
+```
+
+**Same market, same direction, same stop and target percentages.** The only
+difference is which contract you buy, and it turns a coin flip into a clear
+loser — because Rs 55 of round-trip cost against a Rs 234 target is 23% of the
+reward. A cheap option is not a cheap trade.
+
+Pass `--u-stop` and `--u-target` with the levels off your chart. Without them
+the underlying levels are derived from the premium percentages, which is crude
+and the command says so: an option moves several times its underlying.
+
 ## Any time after the close
 
 ```bash

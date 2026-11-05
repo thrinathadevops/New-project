@@ -145,6 +145,7 @@ class TradeBrief:
     range_position: float | None = None
 
     minutes_to_square_off: int | None = None
+    days_to_expiry: float | None = None
     market_open: bool = False
     data_is_live: bool = False
     graded_trades: int = 0
@@ -219,6 +220,7 @@ def brief_from_snapshot(
         global_lean=glob.get("lean", "unknown"),
         range_position=levels.get("range_position"),
         minutes_to_square_off=snapshot.get("minutes_to_square_off"),
+        days_to_expiry=(signal.get("volatility") or {}).get("days_to_expiry"),
         market_open=bool(snapshot.get("market_open")),
         data_is_live=snapshot.get("mode") == "LIVE",
         graded_trades=int(performance.get("trades") or 0),

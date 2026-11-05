@@ -57,10 +57,20 @@ because the setup looks good and the hand is already moving.
 
 It **vetoes** when the trade is structurally unsound: breakeven above target,
 net R:R below 1, cost drag above 5%, one stop-out taking 35%+ of the account,
-fighting an aligned market trend, estimated data, past square-off, or a measured
-negative expectancy. It **cautions** on contextual problems: range regime, high
-VIX, breadth divergence, global cues against, late session, or an edge that is
-still unmeasured.
+fighting an aligned market trend, estimated data, past square-off, **expiry
+day**, or a measured negative expectancy. It **cautions** on contextual
+problems: range regime, high VIX, breadth divergence, global cues against, late
+session, under a day to expiry, or an edge that is still unmeasured.
+
+The expiry checks were added on 2026-11-05, and the gap they close is worth
+stating because it had been open the whole time. The checklist knew how many
+minutes were left in the *session* and nothing about how many days were left on
+the *contract*, although `days_to_expiry` had been computed for IV and spread
+pricing all along. An ATM weekly is almost entirely extrinsic value, so on 0 DTE
+that value decays to zero over a few hours whichever way the index goes — and
+because this project sets stops as a **percentage of the premium**, the stop
+then fires on time passing rather than on the trade being wrong. The premium can
+lose 20% with the index flat. That is not a stop; it is a stopwatch.
 
 Being deterministic matters more than it sounds: run it twice on the same brief
 and you get the same verdict, so a veto can be argued with rather than obeyed.

@@ -93,8 +93,20 @@ def test_a_sample_is_stored_and_readable(db):
     assert rows[0]["index_name"] == "NIFTY"
 
 
-def test_two_samples_in_the_same_second_are_one_observation(db):
-    """A desk that retries a cycle must not double-count the market."""
+def test_two_samples_in_the_same_second_are_one_observation(db, monkeypatch):
+    """A desk that retries a cycle must not double-count the market.
+
+    The clock is frozen rather than raced. Reading the real one made this test
+    depend on both calls finishing inside the same wall-clock second, and under
+    load they do not: it failed once in a full-suite run on 2026-11-05 while
+    passing five times out of five on its own. A test that measures how fast
+    the machine is cannot tell you whether the dedupe works.
+    """
+    import intraday_advisor.ledger.recorder as recorder
+
+    frozen = recorder.now_ist()
+    monkeypatch.setattr(recorder, "now_ist", lambda: frozen)
+
     record_observations(snapshot(), db_path=db)
     second = record_observations(snapshot(spot=22_705.0), db_path=db)
     with connect(db) as conn:

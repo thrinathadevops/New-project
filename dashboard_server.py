@@ -223,6 +223,7 @@ class Broadcaster:
             try:
                 snapshot = await asyncio.to_thread(self.engine.snapshot)
                 self.latest = snapshot
+                await self._observe(snapshot)
                 await self.broadcast(snapshot)
             except Exception as exc:  # noqa: BLE001 - the loop must survive
                 logger.error("Snapshot failed: %s", exc, exc_info=True)
@@ -235,6 +236,33 @@ class Broadcaster:
             self._wake.clear()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=self.refresh_seconds)
+
+    async def _observe(self, snapshot: dict) -> None:
+        """Sample the market every cycle, whatever the signal says.
+
+        Two jobs, and the second is the reason this is here rather than only in
+        the paper desk.
+
+        First, the data: a signal row is written only when direction is CALL or
+        PUT, so the hours the system declined to trade -- most of the day --
+        left no trace in the main ledger at all. `observations` had **zero**
+        rows in it while the desk's copy held 698 for the same session.
+
+        Second, liveness: this is the only thing written on **every** cycle, so
+        it is the only honest answer to "is this process still working?". The
+        supervisor used the signal count for that and restarted both children
+        nine times on 2026-11-05 for being "silent" while they were in fact
+        working correctly and simply had nothing to trade. A heartbeat has to
+        be something that beats even when the answer is no.
+        """
+        try:
+            from intraday_advisor.observe import record_observations
+
+            await asyncio.to_thread(
+                record_observations, snapshot, db_path=self.engine.db_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - observing must never break trading
+            logger.debug("Observation not recorded: %s", exc)
 
     @staticmethod
     async def broadcast(message: dict) -> None:

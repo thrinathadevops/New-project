@@ -156,6 +156,34 @@ class RuleAgent:
                     f"time decay is steepest at the close."
                 )
 
+        # --- 4b. Is the contract about to stop existing? ---------------------
+        #
+        # The checklist knew about minutes to square-off and nothing at all
+        # about days to expiry, although `days_to_expiry` has been computed for
+        # IV and spread pricing all along. On expiry day that omission is the
+        # difference between a stop and a coin toss.
+        #
+        # An ATM weekly option is almost entirely extrinsic value, and on 0 DTE
+        # that value goes to zero over a handful of hours whichever way the
+        # index goes. A stop and target set as percentages of the premium --
+        # which is how this project sets them -- then measure decay more than
+        # direction: the premium can lose 20% without the underlying moving at
+        # all, taking the stop out on a trade that was never wrong.
+        if brief.days_to_expiry is not None:
+            if brief.days_to_expiry <= 0.0:
+                vetoes.append(
+                    "Expiry day. This contract expires today, so a "
+                    "percentage stop on the premium is measuring time decay "
+                    "rather than the trade being wrong — the premium can lose "
+                    "20% with the index flat."
+                )
+            elif brief.days_to_expiry < 1.0:
+                cautions.append(
+                    f"{brief.days_to_expiry:.1f} days to expiry. Decay is now "
+                    f"fast enough to hit a percentage stop on its own, so the "
+                    f"stop no longer means what it says."
+                )
+
         # --- 5. Is this real? -----------------------------------------------
         if not brief.data_is_live:
             vetoes.append(

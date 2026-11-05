@@ -225,6 +225,78 @@ def cmd_plan(args) -> int:
     return 0
 
 
+def cmd_odds(args) -> int:
+    """Forward odds on one trade, with its costs charged.
+
+    Answers the question the edge tests cannot: not "does this rule work" but
+    "what are the odds on *this* setup, and does that beat what the costs
+    demand". Reads the index's own last 60 days, so it needs no broker login.
+    """
+    from intraday_advisor.data import fetch_yahoo_ohlcv
+    from intraday_advisor.forward_odds import assess, history_leg, render
+    from intraday_advisor.index_options import INDEX_CONFIG
+
+    index = args.index.upper()
+    if index not in INDEX_CONFIG:
+        print(f"Unsupported index {index!r}; use one of {list(INDEX_CONFIG)}")
+        return 2
+    lot = args.lot or lot_size_for(index)
+
+    stop_premium = args.stop or args.premium * (1 - args.stop_pct)
+    target_premium = args.target or args.premium * (1 + args.target_pct)
+
+    # Underlying levels. Default them to the same percentage move as the
+    # premium's, which is deliberately crude and is stated as such below --
+    # an option moves several times its underlying, so a real stop comes from
+    # the chart, not from scaling the premium.
+    spot = args.spot
+    u_stop = args.u_stop
+    u_target = args.u_target
+
+    try:
+        bars = fetch_yahoo_ohlcv(INDEX_CONFIG[index]["yahoo"],
+                                 period="60d", interval="5m")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Could not fetch {index} candles: {exc}")
+        return 1
+    if spot is None:
+        spot = float(bars["Close"].iloc[-1])
+    if u_stop is None or u_target is None:
+        print("Note: --u-stop / --u-target not given, so the underlying levels "
+              "were derived from the premium percentages. An option moves "
+              "several times its underlying, so pass the real chart levels for "
+              "a number worth acting on.")
+        print()
+        move = args.u_move
+        if u_stop is None:
+            u_stop = spot * (1 - move)
+        if u_target is None:
+            u_target = spot * (1 + move)
+
+    result = assess(
+        bars, entry_premium=args.premium, stop_premium=stop_premium,
+        target_premium=target_premium, quantity=lot * args.lots,
+        entry=spot, stop=u_stop, target=u_target,
+        bars_left=args.bars_left, replays=args.replays,
+    )
+    print(render(result))
+
+    if result.odds and result.odds.replays:
+        history = history_leg(
+            bars, stop_pct=abs(spot - u_stop) / spot,
+            target_pct=abs(u_target - spot) / spot,
+            bars_left=args.bars_left, long=u_target > spot,
+        )
+        if history.get("sessions"):
+            print()
+            print(f"  Same levels on {history['sessions']} REAL sessions: "
+                  f"target {history['target_first']}, stop "
+                  f"{history['stop_first']}, neither {history['neither']} "
+                  f"(hit rate {history['hit_rate']:.1%})")
+            print(f"    - {history['note']}")
+    return 0
+
+
 def cmd_fill(args) -> int:
     """Record a real contract-note cost so the model matches your fills."""
     implied = record_cost_fill(
@@ -440,6 +512,29 @@ def main(argv=None) -> int:
     costs.add_argument("--target", type=float, default=0.25,
                        help="target move as a fraction (default 0.25)")
     costs.set_defaults(func=cmd_costs)
+
+    odds = subparsers.add_parser(
+        "odds", help="forward odds on one trade, with costs charged")
+    odds.add_argument("--premium", type=float, required=True,
+                      help="entry premium of the option")
+    odds.add_argument("--index", default="NIFTY")
+    odds.add_argument("--lot", type=int, help="lot size (default: from index)")
+    odds.add_argument("--lots", type=int, default=1)
+    odds.add_argument("--stop", type=float, help="absolute stop premium")
+    odds.add_argument("--target", type=float, help="absolute target premium")
+    odds.add_argument("--stop-pct", type=float, default=0.20, dest="stop_pct")
+    odds.add_argument("--target-pct", type=float, default=0.25, dest="target_pct")
+    odds.add_argument("--spot", type=float, help="underlying now (default: last close)")
+    odds.add_argument("--u-stop", type=float, dest="u_stop",
+                      help="underlying level that invalidates the trade")
+    odds.add_argument("--u-target", type=float, dest="u_target",
+                      help="underlying level that completes it")
+    odds.add_argument("--u-move", type=float, default=0.004,
+                      help="fallback underlying move either way (default 0.4%%)")
+    odds.add_argument("--bars-left", type=int, default=40, dest="bars_left",
+                      help="5-minute bars until square-off (default 40)")
+    odds.add_argument("--replays", type=int, default=10_000)
+    odds.set_defaults(func=cmd_odds)
 
     plan = subparsers.add_parser("plan", help="size a position")
     plan.add_argument("--capital", type=float, required=True)
