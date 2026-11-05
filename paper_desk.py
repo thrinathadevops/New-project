@@ -186,8 +186,13 @@ def run_session(
         except (ValueError, OSError):
             pass
 
-    LOG.info("Paper desk starting. capital=Rs %s max_open=%s lots=%s db=%s",
-             f"{capital:,.0f}", max_open, lots, db_path)
+    from intraday_advisor import live_ticks as _lt
+
+    LOG.info(
+        "Paper desk starting. capital=Rs %s max_open=%s lots=%s ticks=%s db=%s",
+        f"{capital:,.0f}", max_open, lots,
+        "on" if _lt.status().get("enabled") else "off (chain pricing)", db_path,
+    )
 
     while not stopping["flag"]:
         try:
@@ -480,6 +485,10 @@ def main() -> int:
                         help="a SEPARATE ledger; never the live one by default")
     parser.add_argument("--dry-run", action="store_true",
                         help="log decisions without recording positions")
+    parser.add_argument(
+        "--ticks", action="store_true",
+        help="keep the tick websocket open (default OFF -- see below)",
+    )
     parser.add_argument("--log", default="",
                         help="defaults to logs/paper_desk/<session>.log")
     args = parser.parse_args()
@@ -507,6 +516,25 @@ def main() -> int:
 
     from intraday_advisor.envfile import load_env
     load_env()
+
+    # The tick websocket is OFF unless asked for, and that is a performance
+    # decision with evidence behind it.
+    #
+    # Measured 2026-11-05: a snapshot took ~100s with the tick stream running
+    # and **23.4s without it**. The SDK's websocket decodes roughly 3,400
+    # frames per cycle, and that Python-level work competes with the snapshot
+    # for the interpreter. A 100-second snapshot against a 45-second loop
+    # means the desk can never keep up -- which is how five October sessions
+    # were lost by processes that stayed alive and recorded nothing.
+    #
+    # This desk does not need sub-second pricing. It samples the market and
+    # prices exits, and `_premium_now` already falls back to the option chain,
+    # which is fetched once per cycle anyway. Trading four times as many
+    # cycles with chain pricing beats trading a quarter as many with tick
+    # pricing.
+    if not args.ticks:
+        from intraday_advisor import live_ticks
+        live_ticks.disable()
 
     state = run_session(
         capital=args.capital, db_path=args.db, max_open=args.max_open,

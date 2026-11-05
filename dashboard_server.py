@@ -497,10 +497,35 @@ def main(argv=None) -> int:
     parser.add_argument("--no-record", action="store_true",
                         help="do not write signals to the ledger")
     parser.add_argument("--db", default=str(DEFAULT_LEDGER_PATH))
+    parser.add_argument("--ticks", action="store_true",
+                        help="keep the tick websocket open for live position "
+                             "P&L (default OFF -- it costs ~77s per snapshot)")
     args = parser.parse_args(argv)
 
     # Credentials and agent keys live in .env; nothing read them before.
     load_env()
+
+    # The tick websocket is OFF unless asked for, for the same measured reason
+    # it is off in paper_desk.py -- and here the evidence is a session that was
+    # actually lost.
+    #
+    # Measured 2026-11-05: a snapshot took ~100s with the tick stream running
+    # and 23.4s without it. The SDK decodes roughly 3,400 frames per cycle in
+    # Python, competing with the snapshot for the interpreter. Against a 15s
+    # refresh that is hopeless, and it is not hypothetical: on 2026-11-04 this
+    # dashboard recorded normally until 11:51 and then **nothing for the rest
+    # of the session** -- hours 09, 10 and 11 hold 39, 61 and 54 signals and
+    # 12:00 to 15:30 holds zero, from a process that stayed alive and kept
+    # logging. Hours 12 to 15 of that day are simply gone.
+    #
+    # What this costs: live tick pricing on open positions. Position P&L falls
+    # back to the option chain, which is fetched once per cycle anyway, so it
+    # updates per refresh instead of per tick. Pass --ticks to get it back once
+    # the SDK decode cost is dealt with properly -- the fix is to stop doing
+    # per-frame Python work on the stream thread, not to re-enable it and hope.
+    if not args.ticks:
+        from intraday_advisor import live_ticks
+        live_ticks.disable()
 
     try:
         asyncio.run(main_async(args))

@@ -3,7 +3,26 @@
 One command each morning, one report whenever you want. Nothing to remember
 during the day.
 
-## Before 09:15
+## Before 09:15 — one command
+
+```bash
+python supervise.py --capital 20000 --max-open 6 --interval 45 --port 8765
+```
+
+That starts the desk and the dashboard and **keeps them recording**, which is
+not the same as keeping them running. It restarts a child that dies, and -- the
+part that matters -- a child that is alive and has stopped writing to the
+ledger during market hours.
+
+That second case is why it exists. Five sessions (26-30 October) were lost to
+processes that were alive in the task list the whole time and recorded nothing;
+4 November was lost from 11:51 onward the same way. A crash is loud. A stalled
+loop looks exactly like a healthy one from outside, so liveness here is
+measured by **output**, not by existence: no new signal for 10 minutes while the
+market is open counts as dead. Progress and restarts go to
+`logs/supervisor.log`.
+
+Starting them by hand still works:
 
 ```bash
 python paper_desk.py --capital 20000 --lots 1 --max-open 6 --interval 45
@@ -14,6 +33,18 @@ The desk trades the session on paper, flattens before square-off, grades its
 own ledger and writes `logs/paper_desk/<date>.log` and `<date>.summary.json`.
 **One file per session, so days accumulate.** The dashboard records every
 signal to the real ledger with the agent's stance and auto-grades at 15:45.
+
+### The tick websocket is off by default
+
+Both accept `--ticks`. Without it there is no live tick stream, and position
+P&L updates once per refresh from the option chain instead of per tick.
+
+That is a measured trade, not caution: a snapshot took **~100s with the tick
+stream running and 23.4s without it**, because the SDK decodes about 3,400
+frames a cycle in Python and that competes with the snapshot. Against a 15s
+refresh the loop can never catch up, which is exactly how 4 November lost
+everything after 11:51. Live tick pricing is worth having back, but it needs
+the per-frame work moved off the stream thread first -- not just the flag.
 
 ## Any time after the close
 

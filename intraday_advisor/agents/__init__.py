@@ -132,12 +132,35 @@ def review_signal(
     return combine(verdicts).as_dict()
 
 
-def agent_status(provider: str | None = None) -> dict:
+#: agent_status probes provider availability, which costs a network round
+#: trip for the keyless local providers. Measured 2026-11-05 it was **1.37
+#: seconds per call, twice per snapshot** -- 2.7s of every cycle spent
+#: re-answering "is Ollama listening?", a question whose answer changes when
+#: somebody starts a service, not when a candle closes.
+_STATUS_CACHE: dict = {}
+_STATUS_TTL = 120.0
+
+
+def agent_status(provider: str | None = None, *, use_cache: bool = True) -> dict:
     """What is configured, whether it can run, and how to set it up.
 
     Surfaced in the dashboard so a misconfigured agent is visible rather than
-    silently absent.
+    silently absent. Cached for two minutes: see _STATUS_TTL.
     """
+    import time as _time
+
+    key = (provider or "").strip().lower()
+    if use_cache:
+        cached = _STATUS_CACHE.get(key)
+        if cached and (_time.time() - cached[0]) < _STATUS_TTL:
+            return dict(cached[1])
+
+    result = _agent_status_uncached(provider)
+    _STATUS_CACHE[key] = (_time.time(), dict(result))
+    return result
+
+
+def _agent_status_uncached(provider: str | None = None) -> dict:
     load_env()
     choice = (provider or os.getenv("AGENT_PROVIDER", "rules")).strip().lower()
     status = {

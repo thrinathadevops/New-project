@@ -35,6 +35,33 @@ traded, because you do not know which kind of day you are in until afterwards.
 **This recomputes from the ledger every time it is asked**, so the two lists
 move as evidence arrives rather than being frozen to what three days happened
 to show. Everything here is a running measurement, not a conclusion.
+
+What it says as of 2026-11-05: nothing is trusted
+-------------------------------------------------
+The figures above were computed over four sessions, on a ledger that turned out
+to be storing the same bar twice under two timezone spellings -- the November
+sessions were inflated about twofold (see ``ledger/dedupe_repair``). Rerun on
+the repaired ledger over **seven sessions and 524 trades, the trusted list is
+empty**. Every component changes sign somewhere:
+
+    gap_signal     -0.174   positive in 1 of 4 sessions
+    warnings       -0.157   positive in 4 of 7
+    ma_ribbon      -0.111   positive in 2 of 7
+    max_pain_pull  -0.107   positive in 1 of 5
+    fvg            +0.100   positive in 5 of 7
+    squeeze        -0.094   positive in 3 of 6
+
+``fvg`` and ``squeeze`` were two of the three the earlier four-session cut
+called consistent, and they are the two that went into ``focused_score``. Both
+flip once there are seven sessions to check them against. That score was
+measured out of sample on the three November sessions and ranks nothing there.
+
+This is the module doing its job rather than failing at it: an empty trusted
+list is the honest answer to "which indicators have earned trust", and it is
+the answer the dashboard should be showing. A component needs more sessions, a
+different horizon, or conditioning on regime before it can be anything else --
+and a list of six that merely had not yet been contradicted was the more
+dangerous output of the two.
 """
 
 from __future__ import annotations

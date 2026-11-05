@@ -20,6 +20,22 @@ Design rules this module enforces:
    written with ``option_token = NULL`` and the grader will mark it
    ``NO_DATA``. A signal that cannot be graded must be visible as such, not
    quietly dropped to flatter the hit rate.
+
+5. **One bar is one instant, however it was spelled.** ``bar_time`` arrives as
+   ``str(DataFrame.index[-1])`` from whichever feed produced the candles, and
+   the engine runs two of them: the chart path fetches from Yahoo, which stamps
+   bars in UTC, while the signal path fetches from Angel, which stamps them in
+   IST. The same 09:30 bar therefore reached this module as both
+   ``2026-11-04 09:30:00+05:30`` and ``2026-11-04 04:00:00+00:00`` -- equal
+   instants, different strings, so the UNIQUE ``dedupe_key`` matched neither
+   and rule 2 above silently stopped working.
+
+   Measured on 2026-11-04: **73 NIFTY rows for 26 distinct bars**. Every
+   per-signal statistic in the project was computed on a sample inflated
+   roughly threefold, which narrows every standard error and every confidence
+   interval by about the square root of that. :func:`canonical_bar_time` now
+   reduces a timestamp to one instant in IST *before* the key is built, so the
+   spelling of the feed cannot affect the count.
 """
 
 from __future__ import annotations
@@ -85,14 +101,46 @@ def _fallback(obj: Any) -> Any:
     return str(obj)
 
 
+#: Every bar timestamp is reduced to this timezone before anything is keyed on
+#: it. The market is in Asia/Kolkata, so a naive timestamp means IST here and
+#: an aware one is converted rather than relabelled.
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def canonical_bar_time(bar_time: Any) -> str:
+    """One spelling per instant: ``YYYY-MM-DD HH:MM:SS+05:30``.
+
+    A timestamp that cannot be parsed is returned as its own string unchanged.
+    That keeps a malformed value visible as a row rather than discarding it,
+    which is the same trade rule 4 makes for an unresolved option token.
+
+    Naive input is **assumed IST**, not UTC. Both producers in this project
+    deal in Indian market bars, so assuming the market's own timezone is the
+    reading that is right when it matters; labelling a naive 09:30 bar as UTC
+    would move it to 15:00 IST and put it in the wrong session.
+    """
+    text = str(bar_time)
+    try:
+        moment = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return text
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=IST)
+    return moment.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S%z")[:-2] + ":30"
+
+
 def _session_date(bar_time: str) -> str:
     """Trading day for a bar timestamp, as YYYY-MM-DD.
+
+    Reads the canonical IST form, so a bar stamped ``2026-11-04 19:00+00:00``
+    is dated to the 5th -- the session it actually falls in -- instead of the
+    4th, which the raw UTC string would have given.
 
     Falls back to the date portion of the raw string when it cannot be parsed,
     so a malformed timestamp degrades a grouping key rather than losing the row.
     """
     try:
-        return datetime.fromisoformat(str(bar_time)).date().isoformat()
+        return datetime.fromisoformat(canonical_bar_time(bar_time)).date().isoformat()
     except (TypeError, ValueError):
         return str(bar_time)[:10]
 
@@ -186,7 +234,9 @@ def record_signal(
     if entry_premium is None or float(entry_premium) <= 0:
         raise ValueError("entry_premium must be positive to record a signal")
 
-    bar_time = str(bar_time)
+    # Canonical before the key, or the same bar spelled two ways becomes two
+    # rows -- see rule 5 in the module docstring.
+    bar_time = canonical_bar_time(bar_time)
     signal_id = uuid.uuid4().hex
     key = _dedupe_key(bar_time, index_name, option_type, float(strike), engine_version)
 

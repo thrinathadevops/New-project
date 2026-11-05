@@ -43,6 +43,43 @@ cannot fix that, and no amount of re-testing on these trades will either.
 So this module exists to be measured **forward**, on sessions it has never
 seen. :func:`compare` reports both scores side by side and labels in-sample
 results as in-sample, every time, without being asked.
+
+FALSIFIED on 2026-11-05. Read this before using it.
+----------------------------------------------------
+The forward test has now run, on three November sessions the selection never
+saw, against a ledger first repaired for a duplicate-row bug (see
+``ledger/dedupe_repair``; the November sessions were inflated about twofold,
+which flattered every earlier figure here):
+
+    session       trades     full   focused
+    ---------- in sample (selection ran on these) --------------
+    2026-10-16        34   -0.204    +0.575
+    2026-10-21       110   -0.189    +0.306
+    2026-10-22        93   +0.071    +0.403
+    2026-10-23        87   +0.219    +0.125
+    ---------- out of sample ------------------------------------
+    2026-11-02        85   +0.242    -0.234
+    2026-11-03        73   +0.141    -0.001
+    2026-11-04        42   -0.311    +0.299
+
+    pooled in-sample   focused +0.130   vs full +0.023
+    pooled OUT         focused -0.026   vs full +0.052
+
+Out of sample the focused score **ranks nothing** (-0.026 over 200 trades) and
+changes sign between consecutive sessions. It does not beat the full score,
+which is itself near zero. The in-sample +0.130 was the selection bias this
+docstring predicted, measured.
+
+Rerun on the repaired ledger, ``indicator_scorecard`` now finds **no component
+trusted at all** across seven sessions: ``fvg`` is positive in 5 of 7,
+``squeeze`` in 3 of 6, and ``oi_wall`` no longer reaches the threshold. The
+three "survivors" survived three sessions and nothing more.
+
+So :data:`SURVIVORS` is kept **as a record of a rejected hypothesis**, not as a
+recommendation, and nothing in the running system imports it. The useful output
+of this module was never the score -- it was finding out, cheaply and in
+public, that the score is not there. Any replacement must be selected on one
+set of sessions and measured on another, as this was, before it is believed.
 """
 
 from __future__ import annotations
@@ -54,9 +91,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-#: The three that kept their sign across every session, and how to read them.
-#: A negative weight means the component is INVERTED: its own "bullish"
-#: contribution preceded worse outcomes, so it is subtracted.
+#: The three that kept their sign across the first three sessions, and how to
+#: read them. A negative weight means the component is INVERTED: its own
+#: "bullish" contribution preceded worse outcomes, so it is subtracted.
+#:
+#: FALSIFIED -- see the module docstring. These three do not hold up on
+#: sessions the selection never saw, and nothing live uses them. Kept so the
+#: rejected hypothesis stays on record instead of being quietly deleted.
 SURVIVORS: dict[str, float] = {
     "fvg": +1.0,
     "oi_wall": +1.0,
