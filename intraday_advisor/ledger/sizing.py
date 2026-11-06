@@ -150,12 +150,29 @@ class PositionPlan:
     spendable_capital: float = 0.0
     #: The deploy cap this plan was sized under, 0-1.
     max_capital_fraction: float = 1.0
+    #: True when the stop sits above net breakeven, so filling it realises a
+    #: gain rather than a loss. This is what the Protect button produces, and
+    #: what a trailing stop produces for the rest of a winning trade.
+    #:
+    #: Before this existed, ``risk_amount`` was ``abs(net_pnl_at_stop)``, which
+    #: turned that gain into a reported risk -- and the better the protective
+    #: stop, the larger the "risk" it reported. A stop 10 rupees above a 160
+    #: entry was announced as "CAUTION: one stop-out costs 5.5% of your
+    #: capital; 13 in a row halves the account", when 13 in a row would have
+    #: grown the account 5.5% at a time. It then advised cutting the position.
+    stop_protects_gain: bool = False
+    #: Rupees realised if a protective stop fills cleanly. Zero otherwise.
+    locked_gain: float = 0.0
 
     @property
     def risk_band(self) -> str:
-        """SAFE / CAUTION / SEVERE, from risk as a share of capital."""
+        """SAFE / CAUTION / SEVERE / PROTECTED, from risk as a share of capital."""
         if not self.affordable:
             return "UNAFFORDABLE"
+        if self.stop_protects_gain:
+            # Not "SAFE": safe describes a small loss, and this is not a loss.
+            # Not "risk-free" either -- see the gap warning in plan_position.
+            return "PROTECTED"
         if self.risk_pct_of_capital >= RISK_PCT_SEVERE:
             return "SEVERE"
         if self.risk_pct_of_capital >= RISK_PCT_CAUTION:
@@ -295,20 +312,54 @@ def plan_position(
     stop_result = net_pnl(entry_premium, stop_premium, pricing_quantity, costs=c)
     target_result = net_pnl(entry_premium, target_premium, pricing_quantity, costs=c)
 
-    risk_amount = abs(stop_result["net_pnl"])
+    # A stop above NET breakeven realises a gain when it fills, so it is not a
+    # risk at all. The sign of the net P&L decides that -- not whether the stop
+    # sits above the entry, because a stop between entry and breakeven still
+    # loses the round-trip cost.
+    #
+    # The previous `abs()` here erased that distinction and reported a locked-in
+    # gain as risk, which made every protective stop look progressively more
+    # dangerous the more it protected. `positions.breakeven_stop` was built
+    # precisely to produce such stops; this module had never been told.
+    stop_net = stop_result["net_pnl"]
+    stop_protects_gain = stop_net >= 0
+    risk_amount = 0.0 if stop_protects_gain else -stop_net
+    locked_gain = stop_net if stop_protects_gain else 0.0
     reward_amount = target_result["net_pnl"]
     rt_cost = stop_result["total_cost"]
 
     denominator = available_capital if available_capital > 0 else float("inf")
     risk_pct = risk_amount / denominator
     reward_pct = reward_amount / denominator
+    # Reward per rupee risked. With no planned risk the ratio is undefined
+    # rather than zero, and 0.0 would read as "terrible" on a position that
+    # cannot lose -- so consumers must branch on `stop_protects_gain`, which
+    # is why that field exists rather than a magic number here.
     net_rr = (reward_amount / risk_amount) if risk_amount > 0 else 0.0
 
     drag = cost_drag_pct(entry_premium, pricing_quantity, costs=c)
     be = breakeven_premium(entry_premium, pricing_quantity, costs=c)
 
     # --- the warnings that matter ---
-    if affordable and risk_pct >= RISK_PCT_CAUTION:
+    if affordable and stop_protects_gain:
+        # Say what is true, and no more than what is true. "Risk-free" would be
+        # the opposite error to the one just fixed: a stop only pays its stated
+        # price if it FILLS at that price, and this app alarms rather than
+        # placing a broker order. On 2026-10-21 a stop at Rs 164.60 filled at
+        # Rs 158.50 because nobody was at the screen -- the stop was right and
+        # absence defeated it.
+        warnings.append(
+            f"PROTECTED: the stop sits above net breakeven, so filling it "
+            f"realises about Rs {locked_gain:,.0f} rather than costing "
+            f"anything. There is no planned loss left in this position."
+        )
+        warnings.append(
+            f"That is not the same as risk-free: a gap can trade straight "
+            f"through Rs {stop_premium:,.2f}, and this app raises an alarm "
+            f"rather than placing a stop with your broker. Place the real SL "
+            f"order if you cannot watch the screen."
+        )
+    if affordable and not stop_protects_gain and risk_pct >= RISK_PCT_CAUTION:
         severity = "SEVERE" if risk_pct >= RISK_PCT_SEVERE else "CAUTION"
         warnings.append(
             f"{severity}: one stop-out costs {risk_pct * 100:.1f}% of your capital "
@@ -381,6 +432,8 @@ def plan_position(
         risk_pct_of_capital=round(risk_pct, 4),
         reward_pct_of_capital=round(reward_pct, 4),
         net_rr=round(net_rr, 2),
+        stop_protects_gain=stop_protects_gain,
+        locked_gain=round(locked_gain, 2),
         cost_drag=round(drag, 5),
         breakeven=round(be, 2),
         round_trip_cost=round(rt_cost, 2),
@@ -406,15 +459,36 @@ def describe_plan(plan: PositionPlan) -> str:
         )
         risk_label = "Risk if stopped "
         reward_label = "Reward if target"
+
+    # A protected stop has no loss to report, and printing "0.00 : 1" for its
+    # reward:risk would read as the worst trade on the screen rather than the
+    # safest. Reward per rupee risked is undefined when nothing is risked.
+    if plan.stop_protects_gain:
+        risk_line = (
+            f"  Gain if stopped     Rs {plan.locked_gain:>12,.2f} "
+            f"(stop is above net breakeven)  [{plan.risk_band}]"
+        )
+        rr_line = (
+            "  Net reward:risk              n/a       "
+            "(no planned loss to divide by)"
+        )
+    else:
+        risk_line = (
+            f"  {risk_label}    Rs {plan.risk_amount:>12,.2f} "
+            f"({plan.risk_pct_of_capital * 100:.1f}% of capital)  [{plan.risk_band}]"
+        )
+        rr_line = (
+            f"  Net reward:risk     {plan.net_rr:>12.2f} : 1   (after all costs)"
+        )
+
     lines = [
         head,
         f"  Capital deployed    Rs {plan.deployed_capital:>12,.2f} "
         f"({plan.capital_utilisation * 100:.0f}% of Rs {plan.available_capital:,.0f})",
-        f"  {risk_label}    Rs {plan.risk_amount:>12,.2f} "
-        f"({plan.risk_pct_of_capital * 100:.1f}% of capital)  [{plan.risk_band}]",
+        risk_line,
         f"  {reward_label}    Rs {plan.reward_amount:>12,.2f} "
         f"({plan.reward_pct_of_capital * 100:.1f}% of capital)",
-        f"  Net reward:risk     {plan.net_rr:>12.2f} : 1   (after all costs)",
+        rr_line,
         f"  Round-trip cost     Rs {plan.round_trip_cost:>12,.2f} "
         f"({plan.cost_drag * 100:.2f}% of position)",
         f"  Breakeven premium   Rs {plan.breakeven:>12.2f} "

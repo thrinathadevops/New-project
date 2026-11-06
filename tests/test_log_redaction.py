@@ -203,3 +203,99 @@ def test_the_live_log_directory_holds_no_tokens():
             if "Bearer eyJ" in text:
                 offenders.append(str(path))
     assert not offenders, f"credentials in {offenders}"
+
+
+# ========================================= the ordering hole, closed structurally ==
+#
+# `install()` walked every logger and handler that EXISTED when it ran. The
+# Angel SDK's logger is created when SmartApi is first imported, and logzero
+# attaches its handler at that moment -- so a logger born after install() never
+# received the filter, and that is exactly the logger that leaks.
+#
+# Measured on 2026-11-06, with install() already wired into three entry points
+# and the patterns already matching: a fresh Bearer token still reached
+# logs/2026-11-06/app.log. The redaction was correct and simply had nothing to
+# attach to yet.
+
+def _fake_jwt() -> str:
+    """Angel's real shape: three base64url segments, 20 / 1204 / 86 chars."""
+    return "eyJhbGciOiJIUzI1NiJ9." + ("a" * 1204) + "." + ("b" * 86)
+
+
+def test_a_logger_created_after_install_is_still_redacted():
+    """The regression that mattered. A record factory runs for every record
+    created anywhere in the process, so there is no ordering to get wrong."""
+    import io
+    import logging as _logging
+
+    from intraday_advisor.log_redaction import install
+
+    install()
+
+    later = _logging.getLogger("test.created.after.install")
+    buffer = io.StringIO()
+    handler = _logging.StreamHandler(buffer)
+    later.addHandler(handler)
+    later.setLevel(_logging.ERROR)
+    later.propagate = False
+
+    later.error("POST failed. Headers: {'Authorization': 'Bearer %s'}",
+                _fake_jwt())
+    written = buffer.getvalue()
+
+    assert "Bearer eyJ" not in written
+    assert "<JWT-REDACTED>" in written
+
+
+def test_the_redacted_line_is_still_diagnosable():
+    """This censors, it does not drop. The connection failure is the thing
+    worth knowing about; only the token is not."""
+    import io
+    import logging as _logging
+
+    from intraday_advisor.log_redaction import install
+
+    install()
+    logger = _logging.getLogger("test.diagnosable")
+    buffer = io.StringIO()
+    logger.addHandler(_logging.StreamHandler(buffer))
+    logger.setLevel(_logging.ERROR)
+    logger.propagate = False
+
+    logger.error("POST to /quote failed. Headers: {'Authorization': "
+                 "'Bearer %s'}", _fake_jwt())
+    written = buffer.getvalue()
+
+    assert "POST to /quote failed" in written
+    assert "Authorization" in written, "you can still see a token WAS sent"
+
+
+def test_installing_twice_does_not_stack_factories():
+    from intraday_advisor.log_redaction import install
+
+    install()
+    second = install()
+    # The factory counts once; repeat calls may still attach filters to new
+    # loggers, but must not reinstall the factory.
+    assert isinstance(second, int)
+
+
+def test_dict_style_log_args_are_redacted_too():
+    """%(name)s-style formatting passes a dict as args, which the tuple branch
+    would have iterated over the KEYS of."""
+    import io
+    import logging as _logging
+
+    from intraday_advisor.log_redaction import install
+
+    install()
+    logger = _logging.getLogger("test.dict.args")
+    buffer = io.StringIO()
+    logger.addHandler(_logging.StreamHandler(buffer))
+    logger.setLevel(_logging.ERROR)
+    logger.propagate = False
+
+    logger.error("auth=%(token)s", {"token": f"Bearer {_fake_jwt()}"})
+    written = buffer.getvalue()
+
+    assert "Bearer eyJ" not in written

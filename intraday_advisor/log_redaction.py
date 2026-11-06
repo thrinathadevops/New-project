@@ -103,15 +103,80 @@ class SecretRedactingFilter(logging.Filter):
 
 _FILTER = SecretRedactingFilter()
 
+#: Set once the record factory is in place, so repeat calls are cheap.
+_FACTORY_INSTALLED = False
+
+
+def _install_record_factory() -> bool:
+    """Redact at record CREATION, which closes the ordering hole.
+
+    The filter-walking below only reaches loggers and handlers that **already
+    exist**. The Angel SDK's logger is created when ``SmartApi`` is first
+    imported, and logzero attaches its handler at the same moment -- so a
+    logger born after ``install()`` ran never received the filter, and that is
+    precisely the logger that leaks.
+
+    Measured on 2026-11-06, with ``install()`` wired into three entry points
+    and the patterns verified to match: a fresh Bearer token still reached
+    ``logs/2026-11-06/app.log``. The redaction was correct and simply was not
+    attached to the logger that mattered yet.
+
+    ``logging.setLogRecordFactory`` runs for every record created anywhere in
+    the process, whatever logger it came from and whenever that logger was
+    made, so there is no ordering to get wrong. The factory is chained onto
+    whatever was there before rather than replacing it, in case something else
+    (pytest, logzero) installed one.
+    """
+    global _FACTORY_INSTALLED
+    if _FACTORY_INSTALLED:
+        return False
+
+    previous = logging.getLogRecordFactory()
+
+    def factory(*args, **kwargs):
+        record = previous(*args, **kwargs)
+        try:
+            if isinstance(record.msg, str):
+                record.msg = redact(record.msg)
+            if record.args:
+                # Redacted independently of msg, so %-placeholders in the
+                # message are untouched: no secret pattern looks like "%s".
+                if isinstance(record.args, dict):
+                    record.args = {
+                        k: (redact(v) if isinstance(v, str) else v)
+                        for k, v in record.args.items()
+                    }
+                else:
+                    record.args = tuple(
+                        redact(a) if isinstance(a, str) else a
+                        for a in record.args
+                    )
+        except Exception:  # noqa: BLE001 -- logging must never raise
+            pass
+        return record
+
+    logging.setLogRecordFactory(factory)
+    _FACTORY_INSTALLED = True
+    return True
+
 
 def install() -> int:
-    """Attach the filter everywhere a record can escape. Returns the count.
+    """Attach the redaction everywhere a record can escape. Returns the count.
 
-    Walks every live logger and handler because logzero -- which the Angel SDK
-    uses -- installs its own handler and does not propagate to root. Safe to
-    call repeatedly: a filter is only added where it is not already present.
+    Two mechanisms, because one is not enough:
+
+    1. A **record factory**, which catches every record at creation regardless
+       of which logger made it or when that logger was created. This is what
+       covers the Angel SDK, whose logger does not exist yet when an entry
+       point calls this.
+    2. Walking every live logger and handler, which covers anything that
+       bypasses the factory -- a handler writing a preformatted string it
+       built itself, for instance.
+
+    Safe to call repeatedly: the factory installs once and a filter is only
+    added where it is not already present.
     """
-    attached = 0
+    attached = 1 if _install_record_factory() else 0
     root = logging.getLogger()
     targets = [root] + [
         logging.getLogger(name)

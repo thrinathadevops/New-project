@@ -453,6 +453,9 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .risk--SAFE    { border-left-color: var(--good);     background: var(--good-wash); }
 .risk--CAUTION { border-left-color: var(--warning);  background: var(--warning-wash); }
 .risk--SEVERE  { border-left-color: var(--critical); background: var(--critical-wash); }
+/* A protected stop is not merely SAFE -- safe describes a small loss, and this
+   is a position with no planned loss left in it. It reads as good news. */
+.risk--PROTECTED { border-left-color: var(--good); background: var(--good-wash); }
 .risk--UNAFFORDABLE { border-left-color: var(--text-muted); }
 
 .risk__metric { display: flex; flex-direction: column; }
@@ -472,6 +475,7 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .tag--SAFE    { background: var(--good);     color: var(--on-good); }
 .tag--CAUTION { background: var(--warning);  color: var(--on-warning); }
 .tag--SEVERE  { background: var(--critical); color: var(--on-critical); }
+.tag--PROTECTED { background: var(--good); color: var(--on-good); }
 .tag--UNAFFORDABLE { background: var(--surface-3); color: var(--text-secondary); }
 .tag--muted   { background: var(--surface-3); color: var(--text-secondary); }
 

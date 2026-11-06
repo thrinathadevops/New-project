@@ -495,7 +495,57 @@ def evaluate_rule(
     # so sorting restores the real sequence.
     pnl = pnl.sort_index()
 
-    result = EdgeStudy(label=label or ("fade" if fade else "follow"),
+    return score_pnl(pnl, horizon=horizon,
+                     label=label or ("fade" if fade else "follow"))
+
+
+def evaluate_signal(
+    study: pd.DataFrame, signal: "pd.Series | list[float]", *, horizon: int,
+    label: str = "",
+) -> EdgeStudy:
+    """Score an arbitrary +1 / 0 / -1 signal, not just a score threshold.
+
+    :func:`evaluate_rule` can only express "buy below this score, sell above
+    that one". Most strategies are not shaped like that -- a value-area fade, a
+    pairs divergence, a volatility-expansion entry and an opening-range
+    breakout all produce a direction per bar from their own logic.
+
+    This is the general entry point, and it runs the **same** overlap
+    corrections: a strategy added here is measured on exactly the terms that
+    withdrew this project's own headline finding. That is the point of routing
+    the whole catalogue through one evaluator rather than letting each strategy
+    report its own arithmetic -- ``research_fade_test.py`` had its own copy of
+    the naive t-statistic for weeks while the correction sat unused next door.
+
+    ``signal`` is aligned to ``study`` positionally; non-zero bars are
+    positions and the P&L of a short is the negative of the forward return.
+    """
+    column = f"fwd{horizon}"
+    if column not in study.columns:
+        return EdgeStudy(label=label or "signal", horizon_bars=horizon,
+                         verdict="no data", notes=[f"{column} not computed."])
+
+    direction = pd.Series(list(signal), index=study.index).fillna(0.0)
+    forward = study[column]
+    taken = direction != 0
+    pnl = (np.sign(direction[taken]) * forward[taken]).dropna()
+    return score_pnl(pnl.sort_index(), horizon=horizon,
+                     label=label or "signal")
+
+
+def score_pnl(pnl: "pd.Series", *, horizon: int, label: str = "") -> EdgeStudy:
+    """Measure a chronologically-ordered P&L series, overlap included.
+
+    Extracted so that every route into this module -- a score threshold, an
+    arbitrary signal, a strategy from the catalogue -- is scored by the same
+    code. Two implementations of a significance test is how one of them stays
+    wrong.
+
+    ``pnl`` must already be in **signed** terms (a short's gain is positive)
+    and in time order, because every correction below reads its serial
+    dependence.
+    """
+    result = EdgeStudy(label=label or "pnl",
                        horizon_bars=horizon, observations=len(pnl))
     if len(pnl) < MIN_SAMPLE:
         result.verdict = "insufficient sample"

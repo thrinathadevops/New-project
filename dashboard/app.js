@@ -209,21 +209,32 @@ function riskStrip(plan) {
           balance. Raise the cap or pick a cheaper strike.</div>` : ''}
       </div>`;
   }
-  const icon = { SAFE: '✓', CAUTION: '!', SEVERE: '‼' }[plan.risk_band] || '';
+  const icon = { SAFE: '✓', CAUTION: '!', SEVERE: '‼', PROTECTED: '🛡' }[plan.risk_band] || '';
+  // A protected stop sits above net breakeven, so it realises a gain instead of
+  // a loss. Showing "0% risk / 0.00 net R:R" would read as the worst row on the
+  // screen rather than the safest, so both cells change meaning with the band.
+  const riskCell = plan.stop_protects_gain
+    ? `<div class="risk__metric">
+        <b>${rupees(plan.locked_gain)}</b><span>locked in</span>
+      </div>
+      <div class="risk__metric">
+        <b>—</b><span>no planned loss</span>
+      </div>`
+    : `<div class="risk__metric">
+        <b>${percent(plan.risk_pct_of_capital)}</b><span>risk</span>
+      </div>
+      <div class="risk__metric">
+        <b>${plan.net_rr.toFixed(2)}</b><span>net R:R</span>
+      </div>`;
   return `
     <div class="risk risk--${plan.risk_band}">
       <span class="tag tag--${plan.risk_band}">${icon} ${plan.risk_band}</span>
       <div class="risk__metric">
         <b>${plan.lots}</b><span>lots</span>
       </div>
+      ${riskCell}
       <div class="risk__metric">
-        <b>${percent(plan.risk_pct_of_capital)}</b><span>risk</span>
-      </div>
-      <div class="risk__metric">
-        <b>${plan.net_rr.toFixed(2)}</b><span>net R:R</span>
-      </div>
-      <div class="risk__metric">
-        <b>${plan.losses_to_halve}</b><span>losses to halve</span>
+        <b>${plan.stop_protects_gain ? '—' : plan.losses_to_halve}</b><span>losses to halve</span>
       </div>
     </div>`;
 }

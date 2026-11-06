@@ -556,3 +556,220 @@ edge in it — which is a real and useful thing to own, provided nobody mistakes
 it for a money machine.
 
 **639 tests.**
+
+---
+
+# Audit and the strategy catalogue (2026-11-06)
+
+Asked to check all the code, fix the gaps, and add the strategies that were
+missing. Four real defects, one credential leak, and a catalogue of nine
+strategy families where there had been one. **1,074 tests.**
+
+## The four defects
+
+### 1. A protective stop was reported as risk, and the better it got the worse it read
+
+`plan_position` computed `risk_amount = abs(net_pnl_at_stop)`. The `abs()` is
+right whenever the stop loses money and exactly wrong when it does not — and
+`positions.breakeven_stop` plus the Protect button exist specifically to produce
+stops that do not. On a 160 entry with a 161.12 net breakeven, 65-lot,
+Rs 500,000:
+
+```
+stop 128  ->  risk 20.59%   SEVERE      correct
+stop 165  ->  risk  2.41%   SAFE        WRONG: that stop realises a gain
+stop 170  ->  risk  5.52%   CAUTION     WRONG, and worse
+stop 200  ->  risk 24.17%   SEVERE      WRONG, and worst of all
+```
+
+At stop 170 the dashboard said *"CAUTION: one stop-out costs 5.5% of your
+capital; 13 in a row halves the account"* and then advised dropping to 38 lots —
+when 13 such stop-outs in a row would have **grown** the account 5.5% at a time.
+
+So the one feature built to protect a winning trade made that trade look
+progressively more dangerous as it became safer, and argued for cutting it.
+That is the most expensive shape a bug can take here.
+
+Fixed: the boundary is **net breakeven, not the entry** (a stop between the two
+still gives up the round trip, and calling that protected would be the same
+error mirrored). New `stop_protects_gain` / `locked_gain` fields, a `PROTECTED`
+risk band, suppressed halving warnings, and `describe_plan` prints
+`n/a` rather than `0.00 : 1` — which would have read as the worst trade on the
+screen rather than the safest. `app.js` swaps the risk cells for the locked-in
+gain, and `net_rr` stays a float because the dashboard calls `.toFixed()` on it.
+
+It is **not** sold as risk-free. A stop only pays its stated price if it fills
+there, and on 2026-10-21 a stop at Rs 164.60 filled at Rs 158.50 because nobody
+was watching.
+
+### 2. A naked short straddle reported a maximum loss of Rs 15,145
+
+`AGENTS.md` states the invariant — *short legs only ever inside defined risk,
+never naked* — and nothing enforced or even detected it:
+
+```
+max_loss         Rs  15,145      while payoff_at(40000) = -Rs 1,089,530
+capital_required Rs  15,145      a fabricated margin, derived from it
+net_rr                  1.0      reading as a balanced trade
+warnings               NONE
+```
+
+Two causes, the second hidden by the first:
+
+- Payoff extremes were probed at the kinks plus **five times the strike span**.
+  A straddle's legs share a strike, so the span was zero and the probe reached
+  five *points* either side of 23,000. For a defined-risk structure that is
+  harmless — the payoff is flat beyond the outermost kink, so any distance
+  gives the same answer — which is exactly why it stayed hidden until a naked
+  structure was priced.
+- Nothing computed the **asymptotic slope**, the only thing separating "flat
+  beyond the wing" from "falling forever".
+
+Fixed with `open_wings()` / `undefined_risk_sides()`: the net option count past
+the outermost strike. Undefined risk now reports the loss at a stated 10%
+adverse move labelled *not* a worst case, refuses to quote margin at all
+(SPAN+ELM is set by the exchange's volatility scan, not by a maximum loss that
+does not exist — the old figure was small enough to look affordable, the worst
+direction to be wrong in), and quotes no reward:risk, because a ratio needs a
+denominator.
+
+### 3. Fixing that exposed the mirror: a long straddle reported negative maximum profit
+
+`max_profit` of **−Rs 15,470** on the one structure with unlimited upside, and
+it would have been warned "cannot make money at this size". Both cost warnings
+compare against a *maximum* profit, so neither applies where there is none. Now
+`unbounded_profit_sides` is reported, the stress figure is labelled as
+understating rather than capping, and the warning is replaced by the move needed
+to cover costs.
+
+### 4. Every structure builder raised `KeyError` on a strike the chain lacked
+
+A live chain returns a window around the money and a condor's wings fall outside
+it routinely, so a missing strike is an ordinary input, not an exceptional one.
+All seven builders now return a `Structure` with a warning naming the absent
+strikes.
+
+## The credential leak
+
+A standing test — *"if this fails, something has started leaking again"* — was
+failing. Live Angel bearer tokens in `logs/supervised_desk.log` and
+`logs/2026-11-06/app.log`, from the SDK logging full request headers on an HTTP
+error.
+
+The patterns matched and `install()` was wired into three entry points. The hole
+was **ordering**: `install()` walks loggers that already exist, and the SDK's
+logger is created when `SmartApi` is first imported — after the entry point ran.
+A logger born later never received the filter, and that is precisely the logger
+that leaks.
+
+Closed with `logging.setLogRecordFactory`, which runs for every record created
+anywhere in the process whatever logger made it and whenever that logger was
+made, chained onto any existing factory. Existing logs scrubbed in place (3
+files; NULs and CRLF preserved — the history is worth keeping, the credentials
+are not).
+
+## The catalogue
+
+`intraday_advisor/strategies/` — 16 strategies across nine families, each a
+**separately measurable object** rather than another term in a sum.
+
+That distinction is the whole design. `scoring.py` holds 37 weights over 32
+price components, and on the repaired ledger (7 sessions, 524 graded trades)
+`indicator_scorecard` finds the trusted list **empty** — every component changes
+sign somewhere, and `focused_score`, rebuilt from the three that looked best,
+was falsified out of sample. Adding strategies to that sum would make it one
+term more of something already measured to carry nothing.
+
+(An earlier cut reported per-part correlations near ±0.40 on an inflated sample:
+the ledger stored each bar twice under UTC and IST spellings of `bar_time`, so a
+UNIQUE key built from the string matched neither. Those figures are superseded.)
+
+| family | had representation before? |
+|---|---|
+| trend, breakout | yes, inside the scorer |
+| mean_reversion | partly |
+| **volatility, premium, relative_value, structure, flow, event** | **none at all** |
+
+Every strategy declares its thesis, its instrument (which sets the cost gate,
+and the cost gate decides nearly everything), and **what would falsify it** —
+refused at construction if absent, the same standard `regime.py` is held to.
+Every signal is scored by `validation.evaluate_signal`: one evaluator, same
+train/test split, same HAC error, same non-overlapping subsamples, same block
+bootstrap. `research_fade_test.py` kept a private copy of the naive t-statistic
+for weeks and produced the claim that was later withdrawn; two implementations
+of a significance test is how one of them stays wrong.
+
+Supporting pieces: `volume_profile.py` (POC, value area, naked POCs — it
+**refuses** to profile a volume column of zeros, which is what indices report)
+and seven new structures in `spreads.py` (straddle, strangle, butterfly, iron
+butterfly, ratio spread, broken-wing butterfly) so a pin or a volatility view
+has something to be expressed with.
+
+### What it measured
+
+`research_strategy_screen.py`, 58 days of 5-minute bars:
+
+```
+strategy                      instrument       n    mean%   t_iid   t_HAC
+opening_range_breakout_15m    option_1lot    895   0.0529    4.19    1.58
+opening_range_fade            option_1lot    895  -0.0529   -4.19   -1.58
+trend_with_strength_filter    option_1lot    792   0.0333    2.37    0.88
+poc_reversion (RELIANCE)      equity         996   0.2251    4.91    1.32
+value_area_fade (RELIANCE)    equity         789   0.1871    3.28    0.88
+```
+
+**Nothing passed. Nothing came close.** Three things there are worth more than a
+pass would have been.
+
+**The harness proves itself.** The ORB breakout and its fade are exact
+negations, and their means come out exactly equal and opposite. A harness that
+found both profitable would be double-counting and every other number worthless.
+That pair stays in the catalogue permanently as a self-check, not for its thesis.
+
+**The overlap correction keeps doing the work.** Four strategies clear t=2 on
+the naive statistic and none survives the HAC version. Every one would have been
+written up as a discovery by the arithmetic this project used in October.
+
+**Market structure looked like the answer and was not.** `poc_reversion` and
+`value_area_fade` have the largest raw means in the catalogue (+0.23% and
++0.19%, both above the 0.19% equity round trip) and the highest naive
+t-statistics — and they **flip sign between train and holdout**, so a rule
+fitted on the first window trades the second backwards. The exact signature of
+the 20-day contrarian cell that nearly shipped in October (holdout t=+2.61,
+train t=−2.03). Regime dependence, not an effect.
+
+### Failures are not interchangeable
+
+Reported separately, because a single pass/fail column would make them look
+alike and only one is a dead end:
+
+- **not significant** — no effect. Nothing fixes this.
+- **loses to costs** — real and too small *for that instrument*. The same
+  signal fails on a one-lot option (0.50–1.25%) and can pass on futures
+  (0.03%). A sizing and instrument problem.
+- **regime-dependent** — sign flips between windows.
+- **insufficient sample** — the honest "do not know", reached far sooner than
+  the raw bar count suggests.
+- **missing inputs** — needs the chain, an IV column or an expiry flag.
+  Bookkeeping, not a verdict. Tests supply those columns and the signals fire,
+  so the logic is measured even where this data is not enough.
+
+### A bug in my own tests, worth recording
+
+The three most important tests in `test_strategies.py` — including the
+**no-lookahead** check, the one invariant that matters, since a lookahead
+produces a beautiful backtest and no money — were silently **skipped**.
+`@pytest.mark.parametrize` is evaluated at collection time and the catalogue was
+loaded by a fixture, so the parameter sets came out empty and pytest reported
+"got empty parameter set" as three passes-shaped skips. A suite that skips its
+own key test is worse than not having it, because the green run is read as
+evidence. Fixed by loading at import, with an assertion that the registry is
+populated.
+
+## Standing conclusion, unchanged
+
+**No rule discovered in this project clears its own transaction costs.** A
+catalogue does not change that arithmetic — a 0.1% edge against a 0.19–1.25%
+round trip loses whatever it is called. What the catalogue changes is that the
+failures are now legible, and that the structures exist to express a view other
+than "buy a call because a number is high".
