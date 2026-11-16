@@ -311,7 +311,13 @@ class Engine:
 
         # --- size it against capital actually on hand ---
         view["plan"] = None
-        view["lot_size"] = None
+        # Always present: the order ticket needs it on a WAIT bar too, where
+        # no plan is sized but a position may still be entered by hand.
+        try:
+            view["lot_size"] = lot_size_for(index)
+        except Exception:  # noqa: BLE001
+            view["lot_size"] = None
+        view["ladder"] = []
         if signal.direction in ("CALL", "PUT") and signal.entry_premium > 0:
             try:
                 lot_size = lot_size_for(index)
@@ -340,6 +346,10 @@ class Engine:
                 index, spot=signal.spot or 0,
                 expiry=self.expiries.get(index.upper()),
             )
+            # The strikes around the money, so the order ticket can open any
+            # contract on either side -- not only the one the engine named.
+            from intraday_advisor.thesis import ladder
+            view["ladder"] = ladder(chain)
             # The measured half-spread is in this frame and was discarded on
             # every refresh, which is why the cost model ran on the published
             # prior instead of this account's own book. One cheap write, no
@@ -870,6 +880,25 @@ class Engine:
         any_live = any(s.get("is_live") for s in signals)
         market = is_market_open()
         mode = "LIVE" if any_live else ("ESTIMATED" if market else "CLOSED")
+
+        # One decision brief per signal, built last so it can cite everything:
+        # the agent's verdict, the calendar and the measured record.
+        from intraday_advisor.thesis import build_thesis
+        for signal in signals:
+            try:
+                signal["thesis"] = build_thesis(
+                    signal,
+                    event_risk=snapshot_so_far.get("event_risk"),
+                    performance=(snapshot_so_far.get("ledger") or {}).get(
+                        "performance"),
+                    minutes_to_square_off=snapshot_so_far.get(
+                        "minutes_to_square_off"),
+                    mode=mode, db_path=self.db_path,
+                )
+            except Exception as exc:  # noqa: BLE001 - a brief must not break a snapshot
+                logger.warning("Thesis failed for %s: %s",
+                               signal.get("index"), exc)
+                signal["thesis"] = None
         events = self._detect_events(signals, positions, mode)
 
         # The pre-market brief announces itself once per day as a toast.

@@ -1,9 +1,12 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Intraday Options Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="app.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128200;</text></svg>">
 </head>
@@ -100,39 +103,15 @@
 
   <div id="mode-banner"></div>
 
-  <!-- ========================================== pre-market brief ===== -->
-  <section class="card" id="premarket-card" style="margin-top:16px"
-           aria-label="Pre-market news brief">
-    <div class="card__head">
-      <h2 class="card__title">Today's news — what it suggests</h2>
-      <div style="display:flex;gap:8px;align-items:center">
-        <span class="tag tag--muted" id="premarket-meta"></span>
-        <button id="premarket-toggle" class="btn btn--ghost">Headlines</button>
-      </div>
-    </div>
-    <div id="premarket-body"></div>
-    <div id="premarket-headlines" hidden></div>
-  </section>
+  <!-- ================================================== views ========= -->
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Sections">
+    <button class="tab is-active" role="tab" data-view="trade">Trade</button>
+    <button class="tab" role="tab" data-view="market">Market</button>
+    <button class="tab" role="tab" data-view="record">Track record</button>
+    <button class="tab" role="tab" data-view="learn">Learn</button>
+  </nav>
 
-  <!-- ========================================= market direction ======= -->
-  <section class="card" style="margin-top:16px" aria-label="Market direction">
-    <div class="card__head">
-      <h2 class="card__title">Which way is the market leaning?</h2>
-      <div style="display:flex;gap:8px;align-items:center">
-        <span class="tag tag--muted" id="agent-status"></span>
-        <button id="regime-toggle" class="btn btn--ghost">Detail</button>
-      </div>
-    </div>
-    <div id="regime-cards" class="regime-grid"></div>
-    <div id="regime-detail" hidden></div>
-    <p class="field__hint" style="margin-top:12px">
-      This describes the state the market is <b>in</b>; it does not predict where
-      it goes next. Nothing can. What it is for: the same 5-minute setup is a
-      different proposition with four timeframes aligned and VIX falling than it
-      is against a daily downtrend with VIX spiking.
-    </p>
-  </section>
-
+  <div class="view" data-view-panel="trade">
   <!-- ============================================== main grid ========= -->
   <div class="grid-main">
 
@@ -228,7 +207,7 @@
   <section class="card" style="margin-top:16px" aria-label="Open positions">
     <div class="card__head">
       <h2 class="card__title">Open positions</h2>
-      <button id="add-position" class="btn btn--primary">+ Add position</button>
+      <button id="add-position" class="btn btn--primary">New order</button>
     </div>
     <div class="table-scroll">
       <table class="data">
@@ -244,9 +223,46 @@
       </table>
     </div>
     <div id="positions-empty" class="empty">
-      No open positions. Add one when you take a trade and it will be monitored
-      here with a loud alarm at your stop.
+      No open positions. Use <b>New order</b> to add any NIFTY or BANKNIFTY
+      contract — as many as you hold. Each is monitored here with a loud alarm
+      at its stop.
     </div>
+  </section>
+
+  </div>
+
+  <div class="view" data-view-panel="market" hidden>
+  <!-- ========================================== pre-market brief ===== -->
+  <section class="card" id="premarket-card" style="margin-top:16px"
+           aria-label="Pre-market news brief">
+    <div class="card__head">
+      <h2 class="card__title">Today's news — what it suggests</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="tag tag--muted" id="premarket-meta"></span>
+        <button id="premarket-toggle" class="btn btn--ghost">Headlines</button>
+      </div>
+    </div>
+    <div id="premarket-body"></div>
+    <div id="premarket-headlines" hidden></div>
+  </section>
+
+  <!-- ========================================= market direction ======= -->
+  <section class="card" style="margin-top:16px" aria-label="Market direction">
+    <div class="card__head">
+      <h2 class="card__title">Which way is the market leaning?</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="tag tag--muted" id="agent-status"></span>
+        <button id="regime-toggle" class="btn btn--ghost">Detail</button>
+      </div>
+    </div>
+    <div id="regime-cards" class="regime-grid"></div>
+    <div id="regime-detail" hidden></div>
+    <p class="field__hint" style="margin-top:12px">
+      This describes the state the market is <b>in</b>; it does not predict where
+      it goes next. Nothing can. What it is for: the same 5-minute setup is a
+      different proposition with four timeframes aligned and VIX falling than it
+      is against a daily downtrend with VIX spiking.
+    </p>
   </section>
 
   <!-- ========================================== stock watchlist ====== -->
@@ -285,6 +301,9 @@
     <p class="field__hint" id="stocks-note" style="margin-top:10px"></p>
   </section>
 
+  </div>
+
+  <div class="view" data-view-panel="record" hidden>
   <!-- ============================================ trade journal ======= -->
   <section class="card" style="margin-top:16px" aria-label="Trade journal">
     <div class="card__head">
@@ -388,19 +407,6 @@
     </div>
   </section>
 
-  <!-- ================================================= learn ========== -->
-  <section class="card" style="margin-top:16px" aria-label="Indicator guide">
-    <div class="card__head">
-      <h2 class="card__title">What the indicators mean</h2>
-      <button id="glossary-toggle" class="btn btn--ghost">Show guide</button>
-    </div>
-    <p class="field__hint" style="margin-top:-6px">
-      Each signal card has a <b>Live read</b> panel that applies all of this to
-      the current numbers. This is the reference for what each one is.
-    </p>
-    <div id="glossary" class="edge-grid" style="margin-top:14px" hidden></div>
-  </section>
-
   <!-- ============================================================= -->
   <!-- Per-candle indicator readings, split by measured reliability.  -->
   <!-- Deliberately the last thing on the page: it is for observing   -->
@@ -447,11 +453,107 @@
     </div>
   </section>
 
+  </div>
+
+  <div class="view" data-view-panel="learn" hidden>
+  <!-- ================================================= learn ========== -->
+  <section class="card" style="margin-top:16px" aria-label="Indicator guide">
+    <div class="card__head">
+      <h2 class="card__title">What the indicators mean</h2>
+      <button id="glossary-toggle" class="btn btn--ghost">Show guide</button>
+    </div>
+    <p class="field__hint" style="margin-top:-6px">
+      Each signal card has a <b>Live read</b> panel that applies all of this to
+      the current numbers. This is the reference for what each one is.
+    </p>
+    <div id="glossary" class="edge-grid" style="margin-top:14px" hidden></div>
+  </section>
+
+  </div>
+
   <p class="field__hint" style="margin-top:22px;text-align:center">
     Decision support, not a profit guarantee. WAIT is a valid and frequent
     output. Estimated data is never actionable and never enters the statistics.
   </p>
 </div>
+
+<!-- ================================================ order ticket ======= -->
+<dialog id="ticket" class="ticket" aria-labelledby="ticket-title">
+  <form method="dialog" class="ticket__form" id="ticket-form">
+    <header class="ticket__head">
+      <h2 id="ticket-title" class="ticket__title">New order</h2>
+      <button type="button" class="icon-btn" id="ticket-close" aria-label="Close">✕</button>
+    </header>
+
+    <div class="ticket__body">
+      <div class="ticket__main">
+        <div class="ticket__row">
+          <div class="field">
+            <label>Index</label>
+            <div class="seg" id="ticket-index" role="radiogroup" aria-label="Index"></div>
+          </div>
+          <div class="field">
+            <label>Side</label>
+            <div class="seg" id="ticket-side" role="radiogroup" aria-label="Option side">
+              <button type="button" class="seg__btn" data-side="CE">CALL · CE</button>
+              <button type="button" class="seg__btn" data-side="PE">PUT · PE</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="ticket__row">
+          <div class="field">
+            <label for="ticket-strike">Strike</label>
+            <select id="ticket-strike"></select>
+          </div>
+          <div class="field">
+            <label for="ticket-premium">Premium paid (₹)</label>
+            <input id="ticket-premium" type="number" min="0.05" step="0.05" inputmode="decimal">
+          </div>
+          <div class="field">
+            <label for="ticket-lots">Lots</label>
+            <input id="ticket-lots" type="number" min="1" step="1" value="1" inputmode="numeric">
+          </div>
+        </div>
+
+        <div class="ticket__row">
+          <div class="field">
+            <label for="ticket-target">Target %</label>
+            <input id="ticket-target" type="number" min="5" max="300" step="5" value="25">
+          </div>
+          <div class="field">
+            <label for="ticket-stop">Stop %</label>
+            <input id="ticket-stop" type="number" min="5" max="90" step="5" value="20">
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button type="button" class="btn" id="ticket-add">Add to basket</button>
+          </div>
+        </div>
+
+        <div class="ticket__math" id="ticket-math"></div>
+        <div class="ticket__brief" id="ticket-brief"></div>
+      </div>
+
+      <aside class="ticket__side">
+        <h3 class="card__title">Basket</h3>
+        <div id="ticket-basket" class="basket"></div>
+        <div class="basket__total" id="ticket-total"></div>
+      </aside>
+    </div>
+
+    <footer class="ticket__foot">
+      <p class="field__hint" id="ticket-note">
+        This records positions you have placed with your broker so they can be
+        monitored. It does not send orders to the exchange.
+      </p>
+      <div class="ticket__actions">
+        <button type="button" class="btn btn--ghost" id="ticket-cancel">Cancel</button>
+        <button type="button" class="btn btn--primary" id="ticket-place">Place order</button>
+      </div>
+    </footer>
+  </form>
+</dialog>
 
 <div class="toasts" id="toasts" role="log" aria-live="polite" aria-label="Alerts"></div>
 <div id="conn-lost" class="conn-lost" hidden>Disconnected — retrying…</div>

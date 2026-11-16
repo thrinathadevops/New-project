@@ -376,9 +376,15 @@ def analyze_index_option(
 def get_option_premium(index: str, strike: float | int, option_type: str, spot: float = 0.0) -> tuple[float, str]:
     """Live premium for a specific strike/type of a held position.
 
-    Returns ``(premium, data_source)``. Falls back to the ATM premium if the
-    exact strike is missing from the chain. Used by the position monitor on
-    every refresh to compute current P&L.
+    Returns ``(premium, data_source)``. Used by the position monitor on every
+    refresh to compute current P&L.
+
+    A strike that is not in the live chain returns **0.0**, never another
+    contract's price. This used to fall back to the ATM premium, which is a
+    different contract: a NIFTY 24650 CE left open from an expired week was
+    priced at the 25300 CE's Rs 82, reported a loss of Rs 1,56,776 that did not
+    exist, and fired a STOP HIT alarm telling you to exit a position on the
+    strength of someone else's quote. An unknown price has to read as unknown.
     """
     chain = suggest_option_trade(index.upper(), spot=spot)
     col = "ce_ltp" if str(option_type).upper() == "CE" else "pe_ltp"
@@ -387,8 +393,7 @@ def get_option_premium(index: str, strike: float | int, option_type: str, spot: 
         match = df[df["strike"] == strike]
         if not match.empty and col in match.columns:
             return float(match[col].iloc[0]), chain.get("data_source", "unknown")
-    atm_col = "atm_ce_ltp" if str(option_type).upper() == "CE" else "atm_pe_ltp"
-    return float(chain.get(atm_col, 0) or 0), chain.get("data_source", "unknown")
+    return 0.0, "strike not in the live chain — price unknown"
 
 
 def scan_indices(

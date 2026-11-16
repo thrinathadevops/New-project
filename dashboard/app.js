@@ -343,6 +343,8 @@ function signalCard(signal, changed) {
         </div>
       </div>
 
+      ${thesisPanel(signal)}
+
       <div class="score">
         ${scoreRing(signal.score || 0)}
         <div class="score__meta">
@@ -511,7 +513,7 @@ function candidatesTable(signal) {
             <thead>
               <tr>
                 <th>Contract</th><th>Premium</th><th>Lots</th><th>Per lot</th>
-                <th>Risk</th><th>Net R:R</th><th>Breakeven</th><th>Costs</th>
+                <th>Risk</th><th>Net R:R</th><th>Breakeven</th><th>Costs</th><th></th>
               </tr>
             </thead>
             <tbody>
@@ -530,6 +532,10 @@ function candidatesTable(signal) {
                   <td>${c.net_rr.toFixed(2)}</td>
                   <td>₹${c.breakeven.toFixed(2)}</td>
                   <td>${percent(c.cost_drag, 2)}</td>
+                  <td><button type="button" class="btn btn--small" data-order
+                        data-index="${escapeHtml(signal.index)}"
+                        data-strike="${c.strike}" data-side="${escapeHtml(c.option_type)}"
+                        data-premium="${c.premium}">Order</button></td>
                 </tr>`;
               }).join('')}
             </tbody>
@@ -955,6 +961,14 @@ function renderSignals(snapshot) {
 
   container.querySelectorAll('.take-trade').forEach((button) => {
     button.addEventListener('click', () => openPositionFromSignal(button.dataset.index));
+  });
+  container.querySelectorAll('[data-order]').forEach((button) => {
+    button.addEventListener('click', () => openTicket({
+      index: button.dataset.index,
+      side: button.dataset.side || undefined,
+      strike: button.dataset.strike ? Number(button.dataset.strike) : undefined,
+      premium: button.dataset.premium ? Number(button.dataset.premium) : undefined,
+    }));
   });
 
   // Expiry is per index: NIFTY can sit on a weekly while BANKNIFTY has only
@@ -2284,28 +2298,14 @@ function pushSettings() {
 
 function openPositionFromSignal(indexName) {
   const signal = state.snapshot.signals.find((s) => s.index === indexName);
-  if (!signal || !signal.plan) return;
-  const lots = window.prompt(
-    `How many lots of ${signal.index} ${signal.strike} ${signal.option_type} `
-    + `did you buy?\n(plan suggests ${signal.plan.lots})`,
-    String(signal.plan.lots));
-  if (lots === null) return;
-  const premium = window.prompt(
-    'Fill premium actually paid (₹):', signal.entry_premium.toFixed(2));
-  if (premium === null) return;
-
-  send({
-    type: 'open_position',
-    index_name: signal.index,
-    option_type: signal.option_type,
-    strike: signal.strike,
-    lot_size: signal.lot_size,
-    lots: Number(lots),
-    entry_premium: Number(premium),
-    target_pct: signal.target_pct,
-    stop_pct: signal.stop_pct,
-    option_token: signal.option_token || null,
-    signal_id: signal.signal_id || null,
+  if (!signal) return;
+  openTicket({
+    index: signal.index,
+    side: signal.option_type || undefined,
+    strike: signal.strike || undefined,
+    premium: signal.entry_premium || undefined,
+    lots: signal.plan ? signal.plan.lots : undefined,
+    signalId: signal.signal_id || null,
   });
 }
 
@@ -2568,20 +2568,9 @@ function wireControls() {
     $('glossary-toggle').textContent = panel.hidden ? 'Show guide' : 'Hide guide';
   });
 
-  $('add-position').addEventListener('click', () => {
-    if (!state.snapshot) return;
-    const tradable = state.snapshot.signals.filter(
-      (s) => s.direction === 'CALL' || s.direction === 'PUT');
-    if (!tradable.length) {
-      showToast({ kind: 'SIGNAL_CLEARED', severity: 'info',
-        title: 'No tradable signal',
-        message: 'Both indices read WAIT. Open the card of the contract you '
-          + 'traded once a signal appears, or add it after one does.',
-        ts: new Date().toISOString() });
-      return;
-    }
-    openPositionFromSignal(tradable[0].index);
-  });
+  $('add-position').addEventListener('click', () => openTicket({}));
+  wireTabs();
+  wireTicket();
 }
 
 function restorePreferences() {
@@ -2625,9 +2614,385 @@ function watchTheme() {
 
 document.addEventListener('DOMContentLoaded', () => {
   restorePreferences();
+  restoreView();
   wireControls();
   initChart();
   watchTheme();
   startClock();
   connect();
 });
+
+
+// ==================================================================== views ==
+
+/** Four views instead of fourteen stacked sections. The decision lives on
+ *  Trade; everything that is context or history is one click away rather than
+ *  three screens of scrolling below the thing you are deciding. */
+function showView(name) {
+  document.querySelectorAll('[data-view-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.viewPanel !== name;
+  });
+  document.querySelectorAll('#tabs .tab').forEach((tab) => {
+    const active = tab.dataset.view === name;
+    tab.classList.toggle('is-active', active);
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+  state.view = name;
+  try { localStorage.setItem('desk-view', name); } catch { /* private mode */ }
+  // A canvas inside a hidden panel has no size, so whatever was painted while
+  // it was hidden is blank. Repaint once it can be measured.
+  requestAnimationFrame(() => {
+    window.dispatchEvent(new Event('resize'));
+    drawChart();
+    if (state.snapshot) drawEquity((state.snapshot.history || {}).daily || []);
+  });
+}
+
+function wireTabs() {
+  document.querySelectorAll('#tabs .tab').forEach((tab) => {
+    tab.addEventListener('click', () => showView(tab.dataset.view));
+  });
+}
+
+function restoreView() {
+  let view = 'trade';
+  try { view = localStorage.getItem('desk-view') || 'trade'; } catch { /* default */ }
+  if (!document.querySelector(`[data-view-panel="${view}"]`)) view = 'trade';
+  showView(view);
+}
+
+// =========================================================== decision brief ==
+
+const CHECK_ICON = { pass: '✓', fail: '✕', neutral: '•' };
+
+/** Why take it, why not, and what decides it -- one argument, in one place.
+ *
+ *  Every row here was already computed and already on the page, spread across
+ *  a dozen panels. The verdict is derived from the rows, so the headline can
+ *  never say something the evidence under it does not. */
+function thesisPanel(signal) {
+  const t = signal.thesis;
+  if (!t) return '';
+  const tradable = signal.direction === 'CALL' || signal.direction === 'PUT';
+  const checks = (t.checks || []).map((c) => `
+    <li class="check check--${escapeHtml(c.state)}${c.blocker ? ' check--blocker' : ''}">
+      <span class="check__icon" aria-hidden="true">${CHECK_ICON[c.state] || '•'}</span>
+      <span class="check__label">${escapeHtml(c.label)}</span>
+      <span class="check__detail">${escapeHtml(c.detail)}</span>
+    </li>`).join('');
+
+  const meter = t.agreement === null || t.agreement === undefined ? '' : `
+    <div class="thesis__meter" title="${escapeHtml(t.disclaimer || '')}">
+      <div class="thesis__meter-num">${t.agreement}<small>%</small></div>
+      <div class="thesis__meter-label">of checks<br>support it</div>
+    </div>`;
+
+  const waitNotes = '';
+
+  return `
+    <section class="thesis thesis--${escapeHtml(t.tone || 'neutral')}"
+             aria-label="Decision brief">
+      <div class="thesis__head">
+        <div>
+          <span class="thesis__verdict">${escapeHtml(t.verdict || '')}</span>
+          <h3 class="thesis__headline">${escapeHtml(t.headline || '')}</h3>
+          <p class="thesis__summary">${escapeHtml(t.summary || '')}</p>
+        </div>
+        ${meter}
+      </div>
+      ${checks ? `<ul class="checks">${checks}</ul>` : waitNotes}
+      <div class="thesis__foot">
+        <span class="field__hint">${escapeHtml(t.disclaimer || '')}</span>
+        <span class="thesis__actions">
+          ${tradable ? `<button type="button" class="btn btn--primary" data-order
+              data-index="${escapeHtml(signal.index)}"
+              data-side="${escapeHtml(signal.option_type || '')}"
+              data-strike="${signal.strike || ''}"
+              data-premium="${signal.entry_premium || ''}">Order this contract</button>` : ''}
+          <button type="button" class="btn" data-order
+              data-index="${escapeHtml(signal.index)}">Choose another strike</button>
+        </span>
+      </div>
+    </section>`;
+}
+
+// ============================================================= order ticket ==
+
+/** The portal could add exactly one position: the engine's own contract, on
+ *  the first tradable index, through two browser prompt boxes -- and nothing
+ *  at all on a WAIT bar. This is the replacement: any strike on either index,
+ *  either side, as many legs as you hold, placed together. */
+const ticket = { index: null, side: 'CE', basket: [], signalId: null };
+
+function ticketSignal() {
+  const signals = (state.snapshot && state.snapshot.signals) || [];
+  return signals.find((s) => s.index === ticket.index) || signals[0] || null;
+}
+
+function ladderPremium(signal, strike, side) {
+  const row = ((signal && signal.ladder) || []).find((r) => r.strike === strike);
+  if (!row) return null;
+  const value = side === 'CE' ? row.ce : row.pe;
+  return value > 0 ? value : null;
+}
+
+function fillStrikes(preferred) {
+  const signal = ticketSignal();
+  const select = $('ticket-strike');
+  const rows = (signal && signal.ladder) || [];
+  const current = preferred !== undefined ? preferred : Number(select.value);
+  if (!rows.length) {
+    // No chain yet: still let a strike be typed in via the preferred value.
+    select.innerHTML = current
+      ? `<option value="${current}">${current}</option>`
+      : '<option value="">chain loading…</option>';
+    return;
+  }
+  select.innerHTML = rows.map((r) => {
+    const price = ticket.side === 'CE' ? r.ce : r.pe;
+    return `<option value="${r.strike}">${r.strike}${r.atm ? ' · ATM' : ''} — ₹${
+      price ? price.toFixed(2) : '—'}</option>`;
+  }).join('');
+  const atm = rows.find((r) => r.atm) || rows[Math.floor(rows.length / 2)];
+  const wanted = rows.some((r) => r.strike === current) ? current : atm.strike;
+  select.value = String(wanted);
+}
+
+function syncTicketPremium() {
+  const signal = ticketSignal();
+  const price = ladderPremium(signal, Number($('ticket-strike').value), ticket.side);
+  if (price) $('ticket-premium').value = price.toFixed(2);
+}
+
+function ticketLeg() {
+  const signal = ticketSignal();
+  const premium = Number($('ticket-premium').value);
+  const lots = Math.max(1, Math.floor(Number($('ticket-lots').value) || 1));
+  const lotSize = (signal && signal.lot_size) || 0;
+  return {
+    index: ticket.index, side: ticket.side,
+    strike: Number($('ticket-strike').value),
+    premium, lots, lotSize,
+    targetPct: Number($('ticket-target').value) / 100,
+    stopPct: Number($('ticket-stop').value) / 100,
+    token: null, signalId: ticket.signalId,
+  };
+}
+
+function legMath(leg) {
+  const quantity = leg.lots * leg.lotSize;
+  const capital = leg.premium * quantity;
+  // Flat Rs 20 an order each way plus statutory charges: a floor, not the
+  // measured figure -- the desk recomputes the real cost once it is open.
+  const fees = 40 + capital * 0.0012;
+  return {
+    quantity, capital, fees,
+    loss: leg.premium * leg.stopPct * quantity + fees,
+    gain: leg.premium * leg.targetPct * quantity - fees,
+    stop: leg.premium * (1 - leg.stopPct),
+    target: leg.premium * (1 + leg.targetPct),
+  };
+}
+
+function legValid(leg) {
+  return leg.index && leg.strike > 0 && leg.premium > 0 && leg.lotSize > 0;
+}
+
+function renderTicketMath() {
+  const leg = ticketLeg();
+  const box = $('ticket-math');
+  if (!legValid(leg)) {
+    box.innerHTML = '<p class="field__hint">Enter a strike and the premium you paid.</p>';
+    renderBasket();
+    return;
+  }
+  const m = legMath(leg);
+  const capital = Number($('capital').value) || 0;
+  const share = capital ? (m.loss / capital) * 100 : 0;
+  const rr = m.loss > 0 ? m.gain / m.loss : 0;
+  box.innerHTML = `
+    <div class="math-grid">
+      <div><span>Quantity</span><b>${m.quantity}</b></div>
+      <div><span>Capital needed</span><b>${rupees(m.capital)}</b></div>
+      <div><span>Target ₹${m.target.toFixed(2)}</span><b class="pos">${rupees(m.gain, { sign: true })}</b></div>
+      <div><span>Stop ₹${m.stop.toFixed(2)}</span><b class="neg">${rupees(-m.loss, { sign: true })}</b></div>
+      <div><span>Reward : risk</span><b>${rr.toFixed(2)}</b></div>
+      <div><span>Loss as % of capital</span><b class="${share >= 10 ? 'neg' : ''}">${share.toFixed(1)}%</b></div>
+    </div>
+    ${capital && m.capital > capital ? `<p class="ticket__warn">This needs ${
+      rupees(m.capital)} and the capital set above is ${rupees(capital)}.</p>` : ''}
+    ${rr < 1 ? '<p class="ticket__warn">After costs you would be risking more than you can win.</p>' : ''}`;
+  renderTicketBrief(leg);
+  renderBasket();
+}
+
+/** The engine's brief applies to the contract it named. For any other strike
+ *  the honest statement is which way the engine leans and that this leg has
+ *  not been analysed -- not a borrowed verdict. */
+function renderTicketBrief(leg) {
+  const signal = ticketSignal();
+  const box = $('ticket-brief');
+  const t = signal && signal.thesis;
+  if (!t) { box.innerHTML = ''; return; }
+  const engineSide = signal.option_type;
+  const same = signal.strike === leg.strike && engineSide === leg.side;
+  const tradable = signal.direction === 'CALL' || signal.direction === 'PUT';
+  let line;
+  if (!tradable) {
+    line = `The engine reads <b>no trade</b> on ${escapeHtml(signal.index)} right now. `
+      + 'This order is your own decision, not a signal.';
+  } else if (same) {
+    line = `This is the contract the engine named: <b>${escapeHtml(t.verdict)}</b>`
+      + (t.agreement !== null && t.agreement !== undefined
+        ? ` (${t.agreement}% of checks support it).` : '.');
+  } else if (engineSide === leg.side) {
+    line = `Same direction as the engine's ${escapeHtml(signal.direction)} read `
+      + `(<b>${escapeHtml(t.verdict)}</b>), but a different strike — its costs `
+      + 'and odds were not analysed.';
+  } else {
+    line = `<b>Against</b> the engine's ${escapeHtml(signal.direction)} read. `
+      + 'Nothing on this screen supports this side.';
+  }
+  const blockers = (t.checks || []).filter((c) => c.blocker).slice(0, 2).map(
+    (c) => `<li>${escapeHtml(c.label)}: ${escapeHtml(c.detail)}</li>`).join('');
+  box.innerHTML = `<p class="ticket__read">${line}</p>${
+    blockers && same ? `<ul class="ticket__blockers">${blockers}</ul>` : ''}`;
+}
+
+function renderBasket() {
+  const box = $('ticket-basket');
+  if (!ticket.basket.length) {
+    box.innerHTML = '<p class="field__hint">Empty. “Place order” places the '
+      + 'contract on the left; “Add to basket” lets you line up several — a '
+      + 'NIFTY call and a BANKNIFTY put, two strikes, anything — and place them together.</p>';
+  } else {
+    box.innerHTML = ticket.basket.map((leg, i) => {
+      const m = legMath(leg);
+      return `
+        <div class="basket__leg">
+          <div>
+            <b>${escapeHtml(leg.index)} ${leg.strike} ${escapeHtml(leg.side)}</b>
+            <span>${leg.lots} lot${leg.lots > 1 ? 's' : ''} @ ₹${leg.premium.toFixed(2)}
+              · ${rupees(m.capital)}</span>
+          </div>
+          <button type="button" class="icon-btn" data-remove="${i}"
+                  aria-label="Remove ${escapeHtml(leg.index)} ${leg.strike} ${escapeHtml(leg.side)}">✕</button>
+        </div>`;
+    }).join('');
+    box.querySelectorAll('[data-remove]').forEach((button) => {
+      button.addEventListener('click', () => {
+        ticket.basket.splice(Number(button.dataset.remove), 1);
+        renderBasket();
+      });
+    });
+  }
+  const totals = ticket.basket.reduce((acc, leg) => {
+    const m = legMath(leg);
+    return { capital: acc.capital + m.capital, loss: acc.loss + m.loss };
+  }, { capital: 0, loss: 0 });
+  $('ticket-total').innerHTML = ticket.basket.length ? `
+    <div><span>Total capital</span><b>${rupees(totals.capital)}</b></div>
+    <div><span>If every stop hits</span><b class="neg">${rupees(-totals.loss, { sign: true })}</b></div>` : '';
+  const count = ticket.basket.length;
+  $('ticket-place').textContent = count
+    ? `Place ${count} order${count > 1 ? 's' : ''}` : 'Place order';
+}
+
+function setTicketIndex(name) {
+  ticket.index = name;
+  document.querySelectorAll('#ticket-index .seg__btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.index === name);
+  });
+}
+
+function setTicketSide(side) {
+  ticket.side = side === 'PE' ? 'PE' : 'CE';
+  document.querySelectorAll('#ticket-side .seg__btn').forEach((b) => {
+    b.classList.toggle('is-active', b.dataset.side === ticket.side);
+  });
+}
+
+function openTicket(prefill = {}) {
+  if (!state.snapshot || !(state.snapshot.signals || []).length) {
+    showToast({ kind: 'SIGNAL_CLEARED', severity: 'info', title: 'Still loading',
+      message: 'The first market snapshot has not arrived yet.',
+      ts: new Date().toISOString() });
+    return;
+  }
+  const signals = state.snapshot.signals;
+  $('ticket-index').innerHTML = signals.map((s) => `
+    <button type="button" class="seg__btn" data-index="${escapeHtml(s.index)}">${
+      escapeHtml(s.index)}</button>`).join('');
+  document.querySelectorAll('#ticket-index .seg__btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      setTicketIndex(button.dataset.index);
+      fillStrikes(undefined);
+      syncTicketPremium();
+      renderTicketMath();
+    });
+  });
+
+  setTicketIndex(prefill.index || ticket.index || signals[0].index);
+  setTicketSide(prefill.side || ticket.side);
+  ticket.signalId = prefill.signalId || null;
+  fillStrikes(prefill.strike);
+  if (prefill.premium) $('ticket-premium').value = Number(prefill.premium).toFixed(2);
+  else syncTicketPremium();
+  if (prefill.lots) $('ticket-lots').value = prefill.lots;
+  $('ticket-target').value = $('target').value;
+  $('ticket-stop').value = $('stop').value;
+  renderTicketMath();
+  const dialog = $('ticket');
+  if (!dialog.open) dialog.showModal();
+}
+
+function placeLeg(leg) {
+  send({
+    type: 'open_position',
+    index_name: leg.index, option_type: leg.side, strike: leg.strike,
+    lot_size: leg.lotSize, lots: leg.lots, entry_premium: leg.premium,
+    target_pct: leg.targetPct, stop_pct: leg.stopPct,
+    option_token: leg.token, signal_id: leg.signalId,
+  });
+}
+
+function wireTicket() {
+  const dialog = $('ticket');
+  const close = () => dialog.close();
+  $('ticket-close').addEventListener('click', close);
+  $('ticket-cancel').addEventListener('click', close);
+
+  document.querySelectorAll('#ticket-side .seg__btn').forEach((button) => {
+    button.addEventListener('click', () => {
+      setTicketSide(button.dataset.side);
+      fillStrikes(undefined);
+      syncTicketPremium();
+      renderTicketMath();
+    });
+  });
+  $('ticket-strike').addEventListener('change', () => {
+    syncTicketPremium();
+    renderTicketMath();
+  });
+  ['ticket-premium', 'ticket-lots', 'ticket-target', 'ticket-stop'].forEach((id) => {
+    $(id).addEventListener('input', renderTicketMath);
+  });
+
+  $('ticket-add').addEventListener('click', () => {
+    const leg = ticketLeg();
+    if (!legValid(leg)) return;
+    ticket.basket.push(leg);
+    renderBasket();
+  });
+
+  $('ticket-place').addEventListener('click', () => {
+    const legs = ticket.basket.length ? ticket.basket.slice() : [ticketLeg()];
+    if (!legs.every(legValid)) {
+      renderTicketMath();
+      return;
+    }
+    legs.forEach(placeLeg);
+    ticket.basket = [];
+    close();
+  });
+}
