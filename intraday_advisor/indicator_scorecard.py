@@ -114,8 +114,8 @@ class IndicatorRecord:
 def _spearman(a, b) -> float:
     ra = pd.Series(a).rank().to_numpy(dtype=float)
     rb = pd.Series(b).rank().to_numpy(dtype=float)
-    ra -= ra.mean()
-    rb -= rb.mean()
+    ra = ra - ra.mean()
+    rb = rb - rb.mean()
     denominator = math.sqrt(float((ra ** 2).sum()) * float((rb ** 2).sum()))
     return float((ra * rb).sum() / denominator) if denominator else 0.0
 

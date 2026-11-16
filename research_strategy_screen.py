@@ -118,12 +118,42 @@ def show_catalogue() -> None:
     print()
 
 
+def bars_for(symbol: str, *, db_path: str = "data/ledger.sqlite"):
+    """Archived candles when there are more of them, else a live fetch.
+
+    The screen ran on whatever Yahoo served -- roughly 58 sessions, a window
+    that **slides**: re-running it next month measures a different and equally
+    short sample, and the oldest sessions are gone from the source for good.
+    The archive accumulates, so reading from it is the difference between a
+    sample that grows with every session and one that never can.
+
+    Falls back to the live fetch whenever the archive holds less, so this is
+    never worse than before.
+    """
+    try:
+        from intraday_advisor.archive import stored_bars
+
+        archived = stored_bars(symbol, db_path=db_path, interval=INTERVAL)
+    except Exception:  # noqa: BLE001 - the screen must run without an archive
+        archived = None
+
+    live = None
+    try:
+        live = fetch_yahoo_ohlcv(symbol, period=PERIOD, interval=INTERVAL)
+    except Exception:  # noqa: BLE001
+        live = None
+
+    if archived is not None and not archived.empty:
+        if live is None or len(archived) >= len(live):
+            return archived
+    if live is None:
+        raise RuntimeError(f"no candles available for {symbol}")
+    return live
+
+
 def screen(symbol: str, label: str, pair_symbol: str | None = None) -> None:
-    frame = fetch_yahoo_ohlcv(symbol, period=PERIOD, interval=INTERVAL)
-    pair = (
-        fetch_yahoo_ohlcv(pair_symbol, period=PERIOD, interval=INTERVAL)
-        if pair_symbol else None
-    )
+    frame = bars_for(symbol)
+    pair = bars_for(pair_symbol) if pair_symbol else None
     print(f"\n{label}: {len(frame):,} bars "
           f"{frame.index[0].date()} to {frame.index[-1].date()}")
     if "Volume" in frame:

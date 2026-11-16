@@ -156,6 +156,29 @@ class RuleAgent:
                     f"time decay is steepest at the close."
                 )
 
+        # --- 1b. Is the risk even bounded? -----------------------------------
+        #
+        # First, before anything else, because every other number on the sheet
+        # assumes a worst case exists. AGENTS.md states this one absolutely --
+        # *short legs only ever inside defined risk, never naked* -- and until
+        # 2026-11-06 nothing enforced or even detected it: a short straddle
+        # reported a maximum loss of Rs 15,145 against a payoff at 20,000 of
+        # **-Rs 10.9 lakh**, with a margin figure fabricated from that
+        # non-existent cap and no warning at all.
+        #
+        # `spreads.undefined_risk_sides` now detects it, but nothing consumed
+        # the flag: the detection and the gate were not connected, so wiring
+        # structures into the live path later would have reinstated the hole.
+        # This is the connection. A VETO, not a caution -- an unbounded loss is
+        # not a contextual problem.
+        if brief.structure_risk_defined is False:
+            sides = " and ".join(brief.structure_undefined_sides or ["one side"])
+            vetoes.append(
+                f"UNDEFINED RISK on the {sides}: this structure is net short "
+                f"options past that wing, so the loss has no floor and every "
+                f"other figure here assumes one. Buy a further wing to cap it."
+            )
+
         # --- 4b. Is the contract about to stop existing? ---------------------
         #
         # The checklist knew about minutes to square-off and nothing at all

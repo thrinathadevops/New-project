@@ -146,6 +146,14 @@ class TradeBrief:
 
     minutes_to_square_off: int | None = None
     days_to_expiry: float | None = None
+    #: Set only when the proposed trade is a multi-leg structure. ``None``
+    #: means "not a structure", which is the current live case -- `spreads.py`
+    #: is research-only and nothing in the engine builds one yet. The check
+    #: exists now so that wiring structures in later cannot quietly bypass the
+    #: one invariant AGENTS.md states absolutely: short legs only ever inside
+    #: defined risk, never naked.
+    structure_risk_defined: bool | None = None
+    structure_undefined_sides: list[str] = field(default_factory=list)
     events_today: list[str] = field(default_factory=list)
     policy_today: bool = False
     event_calendar_stale: bool = False
@@ -181,6 +189,17 @@ def timed(func):
         verdict.latency_ms = int((time.perf_counter() - started) * 1000)
         return verdict.clamped(tradable=brief.tradable)
     return wrapper
+
+
+def _structure(signal: dict) -> dict:
+    """The multi-leg structure on this signal, or an empty mapping.
+
+    Defensive about the type for the same reason :func:`_event_risk` is: a
+    caller handing this a list must get an empty mapping rather than an
+    AttributeError from ``.get()``.
+    """
+    block = (signal or {}).get("structure")
+    return block if isinstance(block, dict) else {}
 
 
 def _event_risk(snapshot: dict) -> dict:
@@ -236,6 +255,9 @@ def brief_from_snapshot(
         range_position=levels.get("range_position"),
         minutes_to_square_off=snapshot.get("minutes_to_square_off"),
         days_to_expiry=(signal.get("volatility") or {}).get("days_to_expiry"),
+        structure_risk_defined=_structure(signal).get("risk_is_defined"),
+        structure_undefined_sides=list(
+            _structure(signal).get("undefined_sides") or []),
         events_today=list(_event_risk(snapshot).get("earnings_today") or []),
         policy_today=bool(_event_risk(snapshot).get("policy_today")),
         event_calendar_stale=bool(

@@ -493,7 +493,14 @@ def describe_plan(plan: PositionPlan) -> str:
         f"({plan.cost_drag * 100:.2f}% of position)",
         f"  Breakeven premium   Rs {plan.breakeven:>12.2f} "
         f"(target Rs {plan.target_premium:.2f})",
-        f"  Consecutive stop-outs to halve the account: {plan.losses_to_halve}",
+        # A protected stop has no planned loss, so there is nothing to repeat.
+        # Printing "0" here reads as "zero stop-outs halve the account" --
+        # alarming, and the opposite of what it means. `app.js` already shows a
+        # dash for this; the text had not been brought into line.
+        (f"  Consecutive stop-outs to halve the account: "
+         f"{plan.losses_to_halve}" if not plan.stop_protects_gain else
+         "  Consecutive stop-outs to halve the account: n/a "
+         "(the stop realises a gain)"),
     ]
     lines.extend(f"  ! {w}" for w in plan.warnings)
     return "\n".join(lines)

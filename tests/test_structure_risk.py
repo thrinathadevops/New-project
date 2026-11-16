@@ -377,3 +377,96 @@ def test_a_fully_priced_structure_is_unaffected_by_the_guard():
                     PREMIUMS, LOT)
     assert len(s.legs) == 4
     assert not any("Not priced" in w for w in s.warnings)
+
+
+# ======================================= the gate, connected (added 2026-11-06) ==
+
+def test_undefined_risk_is_vetoed_by_the_checklist():
+    """The detection existed and nothing consumed it.
+
+    `undefined_risk_sides` correctly flagged a naked short, but no caller
+    outside `spreads.py` read `risk_is_defined`, and the rule checklist had no
+    concept of a structure at all. Wiring structures into the live path later
+    would have reinstated the hole silently. This is the connection.
+    """
+    from intraday_advisor.agents.base import TradeBrief
+    from intraday_advisor.agents.rules import RuleAgent
+
+    base = dict(
+        index="NIFTY", direction="CALL", score=60, contract="23000 straddle",
+        entry_premium=235.0, target_premium=300.0, stop_premium=180.0,
+        lots=1, net_rr=1.2, cost_drag=0.01, data_is_live=True,
+        market_open=True, minutes_to_square_off=120, days_to_expiry=4.0,
+    )
+    verdict = RuleAgent().review(TradeBrief(
+        **base, structure_risk_defined=False,
+        structure_undefined_sides=["upside", "downside"]))
+    assert verdict.stance == "VETO"
+    assert any("UNDEFINED RISK" in c for c in verdict.concerns)
+    assert any("upside and downside" in c for c in verdict.concerns)
+
+
+def test_defined_risk_raises_no_structure_objection():
+    from intraday_advisor.agents.base import TradeBrief
+    from intraday_advisor.agents.rules import RuleAgent
+
+    verdict = RuleAgent().review(TradeBrief(
+        index="NIFTY", direction="CALL", score=60, contract="iron condor",
+        entry_premium=235.0, target_premium=300.0, stop_premium=180.0,
+        lots=1, net_rr=1.2, cost_drag=0.01, data_is_live=True,
+        market_open=True, minutes_to_square_off=120, days_to_expiry=4.0,
+        structure_risk_defined=True))
+    assert verdict.stance != "VETO"
+    assert not any("UNDEFINED RISK" in c for c in (verdict.concerns or []))
+
+
+def test_a_plain_option_signal_is_unaffected():
+    """Today's live case: nothing builds a structure, so the field is None and
+    the check must stay silent rather than invent a veto."""
+    from intraday_advisor.agents.base import TradeBrief
+    from intraday_advisor.agents.rules import RuleAgent
+
+    verdict = RuleAgent().review(TradeBrief(
+        index="NIFTY", direction="CALL", score=60, contract="24500 CE",
+        entry_premium=194.0, target_premium=242.0, stop_premium=155.0,
+        lots=1, net_rr=1.2, cost_drag=0.01, data_is_live=True,
+        market_open=True, minutes_to_square_off=120, days_to_expiry=4.0))
+    assert verdict.stance != "VETO"
+    assert not any("UNDEFINED RISK" in c for c in (verdict.concerns or []))
+
+
+def test_the_flag_reaches_the_brief_from_a_snapshot():
+    """A gate fed by a field nobody populates is the original bug again."""
+    from intraday_advisor.agents.base import brief_from_snapshot
+
+    signal = {
+        "index": "NIFTY", "direction": "CALL", "score": 60, "strike": 23000,
+        "option_type": "CE", "entry_premium": 235.0, "target_premium": 300.0,
+        "stop_premium": 180.0,
+        "structure": {"risk_is_defined": False,
+                      "undefined_sides": ["downside"]},
+    }
+    built = brief_from_snapshot(signal, {"settings": {}}, {})
+    assert built.structure_risk_defined is False
+    assert built.structure_undefined_sides == ["downside"]
+
+
+def test_a_structure_block_of_the_wrong_type_does_not_raise():
+    from intraday_advisor.agents.base import brief_from_snapshot
+
+    built = brief_from_snapshot(
+        {"index": "NIFTY", "direction": "WAIT", "structure": ["not", "a", "map"]},
+        {"settings": {}}, {})
+    assert built.structure_risk_defined is None
+
+
+def test_a_protected_plan_does_not_print_zero_losses_to_halve():
+    """"0 stop-outs halve the account" reads as alarming and means the
+    opposite. app.js already showed a dash; the text had not caught up."""
+    from intraday_advisor.ledger.sizing import describe_plan, plan_position
+
+    plan = plan_position(available_capital=500_000, entry_premium=160.0,
+                         stop_premium=170.0, target_premium=200.0, lot_size=65)
+    line = [l for l in describe_plan(plan).splitlines() if "halve" in l][0]
+    assert "n/a" in line
+    assert "realises a gain" in line
