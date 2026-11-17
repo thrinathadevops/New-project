@@ -71,6 +71,10 @@ class Child:
     last_count: int = -1
     last_progress: float = 0.0
     log_path: str = ""
+    #: False for a child that legitimately writes nothing for hours (the
+    #: experiment only writes when a signal fires). It is still restarted if it
+    #: exits; it is just never judged "silent".
+    heartbeat: bool = True
     _handle: object = field(default=None, repr=False)
 
     def alive(self) -> bool:
@@ -155,6 +159,9 @@ def check(child: Child, *, now: float, market_open: bool) -> str | None:
     """Return a reason to restart, or None. Pure enough to test."""
     if not child.alive():
         return "process exited"
+
+    if not child.heartbeat:
+        return None
 
     if not market_open:
         # A desk that records nothing overnight is behaving correctly.
@@ -287,6 +294,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--poll", type=float, default=60.0)
     parser.add_argument("--no-dashboard", action="store_true")
+    parser.add_argument("--no-experiment", action="store_true",
+                        help="do not run the long-vs-spread paper test")
     parser.add_argument("--log", default="logs/supervisor.log")
     parser.add_argument("--allow-sleep", action="store_true",
                         help="do not hold the machine awake (a suspend then "
@@ -324,6 +333,17 @@ def main() -> int:
                      "--db", "data/ledger.sqlite"],
             db_path="data/ledger.sqlite",
             log_path="logs/supervised_dashboard.log",
+        ))
+
+    if not args.no_dashboard and not args.no_experiment:
+        # Long option vs credit spread on the same signals. It follows the
+        # dashboard's snapshots, so it only makes sense when that is running.
+        children.append(Child(
+            name="experiment",
+            command=[python, "experiment.py", "run"],
+            db_path="data/experiment.sqlite",
+            log_path="logs/supervised_experiment.log",
+            heartbeat=False,
         ))
 
     LOG.info("supervising %d process(es); quiet threshold %.0f min",

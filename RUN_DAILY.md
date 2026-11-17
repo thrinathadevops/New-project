@@ -97,6 +97,28 @@ Pass `--u-stop` and `--u-target` with the levels off your chart. Without them
 the underlying levels are derived from the premium percentages, which is crude
 and the command says so: an option moves several times its underlying.
 
+## The structure test — bought option vs credit spread
+
+Starts automatically with `supervise.py`. To read it:
+
+```bash
+python experiment.py report
+```
+
+Every clean signal opens **both** a bought option and a capped-risk credit
+spread, on the same signal at the same moment, one lot each, on paper, in its
+own ledger (`data/experiment.sqlite`). Whatever the signal is worth, it is the
+same for both — so the difference between them is the structure alone.
+
+Why this is the experiment worth running: every option graded so far was
+*bought* and the record is a loss of about ₹300 per lot. Either the signals are
+no good, or the signals are passable and buying is the wrong structure because
+it pays the volatility premium and bleeds time. Those say opposite things about
+what to do next, and only a side-by-side run separates them.
+
+The report will say "not established" until about 25 sessions are recorded.
+That is deliberate: totals from a handful of days describe those days.
+
 ## The daily store
 
 Automatic — it rides the grader's schedule, so there is nothing to run. After

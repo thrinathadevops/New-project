@@ -160,3 +160,18 @@ def test_the_quiet_threshold_is_longer_than_a_slow_snapshot():
     many missed cycles, not one slow one, or the supervisor becomes the outage."""
     assert QUIET_SECONDS >= 300
     assert GRACE_SECONDS >= 60
+
+
+def test_a_child_without_a_heartbeat_is_never_judged_silent(ledger):
+    """The experiment writes only when a signal fires, which can be hours
+    apart. Judging it by output would restart it all day for doing nothing
+    wrong -- the same mistake that restarted the desk nine times."""
+    kid = child(count=100)
+    kid.heartbeat = False
+    assert check(kid, now=QUIET_SECONDS * 20, market_open=True) is None
+
+
+def test_a_child_without_a_heartbeat_is_still_restarted_when_it_dies(ledger):
+    kid = child(count=100, running=False)
+    kid.heartbeat = False
+    assert check(kid, now=10.0, market_open=True) == "process exited"
