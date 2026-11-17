@@ -286,6 +286,38 @@ class Engine:
         ]
         return {"closed": bars, "forming": forming}
 
+    def _expiry_for(self, index: str) -> str | None:
+        """The expiry to analyse: your choice, else the nearest one worth buying.
+
+        Left to the chain's own default, the engine analysed the contract
+        expiring **today** on every expiry day -- one its own picker labels
+        "extreme decay, do not buy" and its own checklist vetoes outright. So
+        the whole session read DO NOT TAKE, and after a restart on 2026-11-17
+        the desk silently dropped back to it from the contract that had been
+        chosen. With no explicit choice, a contract expiring today is skipped
+        for the next one. Picking it by hand in the expiry menu still works.
+        """
+        chosen = self.expiries.get(index.upper())
+        if chosen:
+            return chosen
+        today = now_ist().date().isoformat()
+        cached = getattr(self, "_default_expiry", {}).get(index.upper())
+        if cached and cached[0] == today:
+            return cached[1]
+        label = None
+        try:
+            from intraday_advisor.nse_option_chain import list_expiries
+
+            upcoming = list_expiries(index.upper())
+            if upcoming and int(upcoming[0].get("days", 1)) <= 0 and len(upcoming) > 1:
+                label = upcoming[1]["label"]
+        except Exception as exc:  # noqa: BLE001 - fall back to the chain default
+            logger.debug("Default expiry lookup failed for %s: %s", index, exc)
+        if not hasattr(self, "_default_expiry"):
+            self._default_expiry = {}
+        self._default_expiry[index.upper()] = (today, label)
+        return label
+
     # ----------------------------------------------------------------- signals
     def _analyse_index(self, index: str) -> dict:
         """One index: signal, score breakdown, sized plan, chart."""
@@ -294,7 +326,7 @@ class Engine:
             signal = analyze_index_option(
                 index, candles=candles, interval=self.interval,
                 target_pct=self.target_pct, stop_pct=self.stop_pct,
-                expiry=self.expiries.get(index.upper()),
+                expiry=self._expiry_for(index),
             )
         except Exception as exc:  # noqa: BLE001 - one index must not kill the snapshot
             logger.warning("Analysis failed for %s: %s", index, exc)
@@ -344,7 +376,7 @@ class Engine:
 
             chain = suggest_option_trade(
                 index, spot=signal.spot or 0,
-                expiry=self.expiries.get(index.upper()),
+                expiry=self._expiry_for(index),
             )
             # The strikes around the money, so the order ticket can open any
             # contract on either side -- not only the one the engine named.
@@ -605,6 +637,13 @@ class Engine:
                         spot=spot_by_index.get(position.index_name, 0) or 0,
                         **extra,
                     )
+                    # A modelled price is not a quote. During market hours the
+                    # first snapshot after a restart can arrive before the
+                    # broker login completes, with the estimated chain's
+                    # invented premiums -- enough to fire a false STOP HIT.
+                    if premium and is_market_open() and \
+                            "live" not in str(source).lower():
+                        premium, source = None, f"{source} — not a live quote"
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Premium fetch failed for %s: %s",
                                  position.position_id, exc)
@@ -894,6 +933,7 @@ class Engine:
                     event_risk=snapshot_so_far.get("event_risk"),
                     performance=(snapshot_so_far.get("ledger") or {}).get(
                         "performance"),
+                    advice=(snapshot_so_far.get("ledger") or {}).get("advice"),
                     minutes_to_square_off=snapshot_so_far.get(
                         "minutes_to_square_off"),
                     # The broker keeps answering after the close, so "LIVE"
@@ -993,26 +1033,46 @@ class Engine:
 
 
     def _scorecard(self) -> dict:
-        """Each indicator's track record, recomputed at most every 5 minutes.
+        """Each indicator's track record, rebuilt off the snapshot path.
 
-        It reads every graded trade and correlates 27 components per session,
-        which is far too much work for a 10-second refresh and changes only
-        when a session is graded -- once a day.
+        It reads every graded trade and rank-correlates each component per
+        session -- about **73 seconds** on the current ledger. It used to run
+        inline every five minutes, so every five minutes one snapshot took over
+        a minute and the chart, the prices and every stop alarm froze with it.
+
+        The record only changes when a session is graded, once a day. So it is
+        rebuilt on a background thread, at most every 30 minutes, and the
+        snapshot always returns immediately with the last finished result.
         """
         now = time.time()
-        if self._scorecard_cache and (now - self._scorecard_at) < 300:
-            return self._scorecard_cache
-        try:
-            from intraday_advisor.indicator_scorecard import scorecard
+        fresh = self._scorecard_cache and (now - self._scorecard_at) < 1800
+        if not fresh and not getattr(self, "_scorecard_refreshing", False):
+            self._scorecard_refreshing = True
 
-            card = scorecard(db_path=self.db_path)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Scorecard unavailable: %s", exc)
-            card = {"trusted": [], "unproven": [], "sessions": 0,
-                    "note": f"Scorecard unavailable: {exc}"}
-        self._scorecard_cache = card
-        self._scorecard_at = now
-        return card
+            def worker() -> None:
+                try:
+                    from intraday_advisor import offload
+                    from intraday_advisor.indicator_scorecard import scorecard
+
+                    # A thread alone is not enough: 73 seconds of pandas holds
+                    # the interpreter lock. See offload.py.
+                    self._scorecard_cache = offload.call(
+                        scorecard, db_path=str(self.db_path))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Scorecard unavailable: %s", exc)
+                    if not self._scorecard_cache:
+                        self._scorecard_cache = {
+                            "trusted": [], "unproven": [], "sessions": 0,
+                            "note": f"Scorecard unavailable: {exc}"}
+                finally:
+                    self._scorecard_at = time.time()
+                    self._scorecard_refreshing = False
+
+            threading.Thread(target=worker, daemon=True,
+                             name="scorecard-refresh").start()
+        return self._scorecard_cache or {
+            "trusted": [], "unproven": [], "sessions": 0,
+            "note": "Indicator track record is being computed…"}
 
     def _ledger_panel(self) -> dict:
         """Edge measurement for the dashboard, with its honest caveats."""
@@ -1045,28 +1105,72 @@ def _auto_grade_note(db_path) -> dict:
         return {"note": "", "pending_sessions": []}
 
 
+#: Two-sided 95% t critical values by degrees of freedom. With nine sessions
+#: the right multiplier is 2.31, not the 1.96 that assumes a large sample.
+_T95 = {1: 12.71, 2: 4.30, 3: 3.18, 4: 2.78, 5: 2.57, 6: 2.45, 7: 2.36, 8: 2.31,
+        9: 2.26, 10: 2.23, 12: 2.18, 15: 2.13, 20: 2.09, 25: 2.06, 30: 2.04}
+
+
+def _t95(df: int) -> float:
+    if df <= 0:
+        return float("inf")
+    for limit in sorted(_T95):
+        if df <= limit:
+            return _T95[limit]
+    return 1.96
+
+
+def _pending_today(db_path) -> int:
+    """Real signals recorded today that the grader has not scored yet."""
+    try:
+        from intraday_advisor.ledger.schema import connect
+
+        with connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM signals s LEFT JOIN signal_outcomes o "
+                "ON o.signal_id = s.signal_id WHERE o.signal_id IS NULL "
+                "AND s.is_synthetic = 0 AND s.session_date = ?",
+                (now_ist().date().isoformat(),)).fetchone()
+        return int(row[0] or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def plain_verdict(performance: dict, db_path) -> dict:
     """The measured answer to "should I buy anything right now", in plain words.
 
-    Every number here was already computed and reachable only from a command
-    line. A dashboard that shows eight indicators, an option chain and a
-    confluence score, while burying "this system lost money on 96 of its last
-    108 trades" behind ``ledger_cli.py report``, is a dashboard that makes it
-    easier to trade than to find out whether trading is a good idea.
+    Counted by SESSION, not by trade
+    --------------------------------
+    The first version read: "Over 597 completed trades ... the entire
+    statistical range sits on the losing side. That is a measurement, not bad
+    luck" -- and it showed that sentence, unchanged, every day.
 
-    Written for somebody who has said they have no background in markets, so
-    the rates are restated as counts ("about one winner in every nine") and the
-    confidence interval as a range of losses rather than as a bound.
+    It was static because the record only changes when a session is graded.
+    It was also **wrong**, by this project's own rule: trades inside one day
+    share that day's market and are not independent, so dividing by the square
+    root of 597 claims far more certainty than nine trading days can give.
+    Counted by session the same ledger says: 9 sessions, 3 of them profitable
+    including the most recent, average about Rs -330 per signal, range roughly
+    Rs -1,000 to Rs +350. That is "not proven, leaning negative" -- a different
+    statement from "measured losses", and the difference decides whether the
+    risk checklist vetoes every trade forever.
+
+    So the verdict is built from :func:`sessions.session_series`, with a
+    t-interval sized for the number of sessions, and it carries what is
+    current: the date of the last graded session, how that session went, the
+    recent run, and how many of today's signals are waiting to be added.
+
+    Written for somebody with no background in markets: rates are restated as
+    counts and the interval as a plain range.
     """
     trades = int(performance.get("trades") or 0)
-    low = performance.get("expectancy_low")
-    high = performance.get("expectancy_high")
     expectancy = performance.get("expectancy")
     win_rate = performance.get("win_rate")
 
     advice: dict = {
         "trades": trades, "expectancy": expectancy, "win_rate": win_rate,
-        "hourly": [], "worst_hours": [],
+        "hourly": [], "worst_hours": [], "recent": [], "sessions": 0,
+        "established": False,
     }
 
     # The hour breakdown, because it is the one pattern in this ledger strong
@@ -1085,71 +1189,114 @@ def plain_verdict(performance: dict, db_path) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.debug("Hourly breakdown unavailable: %s", exc)
 
-    if trades < 20:
+    rows: list = []
+    try:
+        from intraday_advisor.sessions import session_series
+
+        rows = list(session_series(db_path=db_path).per_session or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Session series unavailable: %s", exc)
+
+    pending = _pending_today(db_path)
+    waiting = (
+        f" Today's {pending} signal(s) are added when the session is graded, "
+        f"after 15:45." if pending else ""
+    )
+    advice["pending_today"] = pending
+
+    count = len(rows)
+    advice["sessions"] = count
+    advice["recent"] = [
+        {"session": r["session"], "per_signal": r["per_signal"],
+         "signals": r["signals"]} for r in rows[-6:]
+    ]
+
+    if count < 3 or trades < 20:
         advice.update({
             "state": "UNMEASURED",
             "headline": "No measured edge yet - treat every trade as an experiment.",
             "detail": (
-                f"Only {trades} trade(s) have been graded. A win rate needs "
-                f"about 20 before it means anything, so nothing on this screen "
-                f"can yet tell you whether this system makes money."
+                f"{trades} signal(s) graded across {count} session(s). A few "
+                f"days cannot tell a strategy from a lucky or unlucky stretch, "
+                f"so nothing on this screen can yet say whether this system "
+                f"makes money.{waiting}"
             ),
             "what_would_change_it": (
-                "Run `python ledger_cli.py grade` after each close until there "
-                "are 20 or more graded trades."
+                "Keep it running each session. The picture starts to mean "
+                "something at around 25 graded sessions."
             ),
             "tradeable": False,
         })
         return advice
 
-    if high is not None and high < 0:
-        wins = int(performance.get("wins") or 0)
-        one_in = round(1 / win_rate) if win_rate else 0
+    values = [float(r["per_signal"]) for r in rows]
+    mean = sum(values) / count
+    sd = math.sqrt(sum((v - mean) ** 2 for v in values) / (count - 1))
+    margin = _t95(count - 1) * sd / math.sqrt(count)
+    low, high = mean - margin, mean + margin
+    positive = sum(1 for v in values if v > 0)
+    last = rows[-1]
+    last_text = (
+        f"The latest graded session, {last['session']}, "
+        f"{'made' if last['per_signal'] > 0 else 'lost'} Rs "
+        f"{abs(last['per_signal']):,.0f} per signal on {last['signals']} signals."
+    )
+    wins_in_ten = round((win_rate or 0) * 10)
+    advice.update({
+        "mean_per_signal": round(mean, 2), "ci_low": round(low, 2),
+        "ci_high": round(high, 2), "positive_sessions": positive,
+        "last_session": last["session"],
+    })
+    record = (
+        f"{positive} of {count} graded sessions made money and the average is "
+        f"Rs {mean:,.0f} per signal after costs (about {wins_in_ten} winners "
+        f"in every 10 signals)."
+    )
+    spread = (
+        f"Day to day it has ranged widely, so the true average could be "
+        f"anywhere from Rs {low:,.0f} to Rs {high:,.0f}."
+    )
+
+    if high < 0:
         advice.update({
-            "state": "LOSING",
-            "headline": "Do not buy anything. This system has measured losses.",
+            "state": "LOSING", "established": True,
+            "headline": "Do not buy on these signals: the losses are established.",
             "detail": (
-                f"Over {trades} completed trades it won {wins} and lost "
-                f"{trades - wins} - about one winner in every {one_in}. The "
-                f"average trade lost Rs {abs(expectancy):,.0f} per lot, and the "
-                f"entire statistical range (a loss of Rs {abs(high):,.0f} to "
-                f"Rs {abs(low):,.0f}) sits on the losing side. That is a "
-                f"measurement, not bad luck."
+                f"{record} Even the favourable end of the range, Rs "
+                f"{high:,.0f}, is a loss. {last_text}{waiting}"
             ),
             "what_would_change_it": (
-                "The measured average has to move above zero. Until it does, "
-                "every contract on this screen is one this system has been "
-                "losing money on."
+                "The session average has to recover until the range includes "
+                "zero again."
             ),
             "tradeable": False,
         })
-        return advice
-
-    if low is not None and low > 0:
+    elif low > 0:
         advice.update({
             "state": "EDGE",
-            "headline": f"Measured edge: Rs {expectancy:,.0f} per lot on average.",
+            "headline": f"Measured edge: Rs {mean:,.0f} per signal on average.",
             "detail": (
-                f"Over {trades} trades the entire statistical range is above "
-                f"zero. That is the only condition under which the rest of "
-                f"this screen is worth acting on."
+                f"{record} Even the unfavourable end of the range, Rs "
+                f"{low:,.0f}, is a gain. {last_text}{waiting}"
             ),
             "what_would_change_it": "",
             "tradeable": True,
         })
-        return advice
-
-    advice.update({
-        "state": "INCONCLUSIVE",
-        "headline": "Too close to call - the measured result straddles zero.",
-        "detail": (
-            f"Over {trades} trades the average is Rs {expectancy:,.0f} per lot, "
-            f"but the range runs from Rs {low:,.0f} to Rs {high:,.0f}. It could "
-            f"be a small edge or a small loss; there is not enough evidence."
-        ),
-        "what_would_change_it": "More graded trades will narrow the range.",
-        "tradeable": False,
-    })
+    else:
+        leaning = "leaning negative" if mean < 0 else "leaning positive"
+        advice.update({
+            "state": "INCONCLUSIVE",
+            "headline": (
+                f"Not proven either way - {leaning} after {count} sessions."
+            ),
+            "detail": f"{record} {spread} {last_text}{waiting}",
+            "what_would_change_it": (
+                f"More sessions narrow the range. About 25 are needed before "
+                f"it can be trusted; you have {count}. Until then this is not "
+                f"evidence of an edge - trade small or on paper."
+            ),
+            "tradeable": False,
+        })
     return advice
 
 

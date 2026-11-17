@@ -1755,3 +1755,16 @@ table.data td { border-bottom: 1px solid var(--border); }
 .checks--compact { margin-top: 0; border-top: 0; font-size: 13px; }
 .checks--compact .check { grid-template-columns: 20px 150px 1fr; padding: 7px 0; }
 .checks--compact .check--blocker { margin: 0 -13px; padding-left: 13px; padding-right: 13px; }
+
+/* ---------------------------------- recent sessions inside the verdict banner */
+.verdict-banner__recent { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+.session-chip {
+  display: inline-flex; gap: 8px; align-items: baseline;
+  padding: 4px 9px; font-size: 12px;
+  border: 1px solid var(--border); background: var(--surface-1);
+  color: var(--text-secondary); font-variant-numeric: tabular-nums;
+}
+.session-chip b { font-weight: 600; color: var(--text-primary); }
+.session-chip--up b   { color: var(--good); }
+.session-chip--down b { color: var(--critical); }
+.session-chip--pending { border-style: dashed; }

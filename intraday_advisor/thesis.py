@@ -307,11 +307,36 @@ def _agent(signal: dict) -> dict:
                   "The risk checklist has not ruled on this bar.")
 
 
-def _record(performance: dict) -> dict:
+def _record(performance: dict, advice: dict | None = None) -> dict:
+    """The measured record, counted by session when that is available.
+
+    The per-trade average alone said "LOST ... that is the measured record"
+    on every signal. Nine days of trades are not hundreds of independent
+    results, so the session-level verdict from ``engine.plain_verdict`` is used
+    whenever it is supplied: a loss is called a loss only when it is
+    established, and "not proven" is reported as exactly that.
+    """
     perf = performance or {}
     trades = int(_num(perf.get("trades"), 0) or 0)
     expectancy = _num(perf.get("expectancy"))
-    if trades < 30 or expectancy is None:
+    state = str((advice or {}).get("state") or "")
+    sessions = int(_num((advice or {}).get("sessions"), 0) or 0)
+
+    if state == "LOSING":
+        return _check("record", "Measured track record", FAIL,
+                      f"Established loss: {advice.get('detail', '')}")
+    if state == "EDGE":
+        return _check("record", "Measured track record", PASS,
+                      str(advice.get("detail", "")))
+    if state == "INCONCLUSIVE":
+        mean = _num(advice.get("mean_per_signal"), 0) or 0
+        wins = int(_num(advice.get("positive_sessions"), 0) or 0)
+        return _check(
+            "record", "Measured track record", NEUTRAL,
+            f"Not proven either way: {wins} of {sessions} sessions made "
+            f"money, averaging ₹{mean:,.0f} per signal. Could still turn out "
+            f"a gain or a loss — no edge shown yet.")
+    if state == "UNMEASURED" or trades < 30 or expectancy is None:
         return _check("record", "Measured track record", NEUTRAL,
                       f"Only {trades} graded signal(s) so far — too few to "
                       f"say whether these signals make money.")
@@ -405,7 +430,7 @@ def _odds(signal: dict, bullish: bool, minutes_left, db_path) -> dict | None:
 def build_thesis(
     signal: dict, *, event_risk: dict | None = None,
     performance: dict | None = None, minutes_to_square_off=None,
-    mode: str = "", db_path=None,
+    mode: str = "", db_path=None, advice: dict | None = None,
 ) -> dict:
     """The decision brief for one signal. Never raises.
 
@@ -442,7 +467,7 @@ def build_thesis(
         _time(signal, minutes_to_square_off),
         _events(event_risk or {}),
         _agent(signal),
-        _record(performance or {}),
+        _record(performance or {}, advice),
     ]
     odds = _odds(signal, bullish, minutes_to_square_off, db_path)
     if odds:
@@ -515,6 +540,7 @@ def quote_leg(
     lots: int, target_pct: float, stop_pct: float, available_capital: float,
     costs=None, event_risk: dict | None = None, performance: dict | None = None,
     minutes_to_square_off=None, mode: str = "", db_path=None,
+    advice: dict | None = None,
 ) -> dict:
     """Exact numbers and a brief for ANY contract, not only the engine's.
 
@@ -584,7 +610,8 @@ def quote_leg(
     })
     thesis = build_thesis(
         leg, event_risk=event_risk, performance=performance,
-        minutes_to_square_off=minutes_to_square_off, mode=mode, db_path=db_path)
+        minutes_to_square_off=minutes_to_square_off, mode=mode, db_path=db_path,
+        advice=advice)
     engine_direction = str(signal.get("direction") or "WAIT").upper()
     if engine_direction not in ("CALL", "PUT"):
         out["notes"].append(

@@ -253,10 +253,24 @@ class RuleAgent:
                 f"its edge is still unmeasured. Treat position sizes as "
                 f"experiments, not convictions."
             )
-        elif brief.measured_expectancy is not None and brief.measured_expectancy < 0:
+        elif (brief.measured_expectancy is not None
+              and brief.measured_expectancy < 0 and brief.expectancy_established):
             vetoes.append(
                 f"Measured expectancy is ₹{brief.measured_expectancy:.0f} per lot "
-                f"— this strategy has lost money over its graded history."
+                f"— this strategy has lost money over its graded history, and "
+                f"the loss holds up session by session."
+            )
+        elif brief.measured_expectancy is not None and brief.measured_expectancy < 0:
+            # Negative so far, NOT established. This used to be a veto on the
+            # per-trade average alone, which treated hundreds of trades from
+            # nine days as independent and so vetoed every trade, every day.
+            # Counted by session the range includes zero; that is a reason for
+            # small size, not a refusal.
+            cautions.append(
+                f"The average so far is ₹{brief.measured_expectancy:.0f} per "
+                f"lot, but that is not established — counted by session the "
+                f"result could still be a gain or a loss. Treat size as an "
+                f"experiment."
             )
         elif brief.measured_expectancy is not None:
             supports.append(

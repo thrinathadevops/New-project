@@ -168,7 +168,8 @@ def test_a_pair_opens_both_arms_and_closes_each_on_its_own_rule(db):
             row["ce"], row["pe"] = 240.0, 20.0
         if row["strike"] == 25250.0:
             row["pe"] = 8.0
-    lines = ex.manage({"NIFTY": rallied}, now_hhmm="11:00", db_path=db)
+    lines = ex.manage({"NIFTY": rallied}, now_hhmm="11:00", db_path=db,
+                      expiries={"NIFTY": "23NOV2026"})
     assert len(lines) == 2
     assert any(l.startswith("LONG") and "target" in l for l in lines)
     assert any(l.startswith("SPREAD") and "target" in l for l in lines)
@@ -181,12 +182,17 @@ def test_a_pair_opens_both_arms_and_closes_each_on_its_own_rule(db):
     assert result["open"] == 0
 
 
-def test_a_spread_missing_a_leg_price_is_held_not_half_closed(db):
+def test_a_spread_missing_a_leg_price_is_held_not_half_closed(db, monkeypatch):
+    from intraday_advisor import index_options
+
+    monkeypatch.setattr(index_options, "get_option_premium",
+                        lambda *a, **k: (0.0, "price unknown"))
     sig = signal()
     spread = ex.pick_spread(sig["ladder"], sig["spot"], "CALL")
     ex.open_pair(sig, spread, db_path=db)
     partial = [r for r in sig["ladder"] if r["strike"] != 25250.0]
-    lines = ex.manage({"NIFTY": partial}, now_hhmm="15:12", db_path=db)
+    lines = ex.manage({"NIFTY": partial}, now_hhmm="15:12", db_path=db,
+                      expiries={"NIFTY": "23NOV2026"})
     assert not any(l.startswith("SPREAD") for l in lines), (
         "a two-leg spread valued on one leg is a naked option")
 
@@ -195,7 +201,8 @@ def test_the_report_refuses_to_call_a_winner_on_a_few_sessions(db):
     sig = signal()
     spread = ex.pick_spread(sig["ladder"], sig["spot"], "CALL")
     ex.open_pair(sig, spread, db_path=db)
-    ex.manage({"NIFTY": sig["ladder"]}, now_hhmm="15:12", db_path=db)
+    ex.manage({"NIFTY": sig["ladder"]}, now_hhmm="15:12", db_path=db,
+              expiries={"NIFTY": "23NOV2026"})
     text = ex.render(ex.results(db_path=db))
     assert "not established" in text
     assert str(ex.MIN_SESSIONS) in text
@@ -225,3 +232,70 @@ def test_another_days_entries_do_not_count(db):
     ex.open_pair(sig, ex.pick_spread(sig["ladder"], sig["spot"], "CALL"),
                  db_path=db)
     assert ex.todays_entries(db_path=db, today="2020-01-01") == (0, {})
+
+
+def test_another_expirys_ladder_never_prices_a_position(db, monkeypatch):
+    """Regression, 2026-11-17. A dashboard restart reset the ladder to the
+    contract expiring that day; matching on strike alone priced next week's
+    25400 call at Rs 57.65 and closed two longs at "stops" worth Rs 17,744 of
+    loss that never happened."""
+    from intraday_advisor import index_options
+
+    sig = signal()
+    ex.open_pair(sig, ex.pick_spread(sig["ladder"], sig["spot"], "CALL"),
+                 db_path=db)
+    asked = []
+
+    def own_expiry(index, strike, side, spot=0.0, expiry=None):
+        asked.append(expiry)
+        return 0.0, "price unknown"
+
+    monkeypatch.setattr(index_options, "get_option_premium", own_expiry)
+    crashed = [{"strike": r["strike"], "ce": 5.0, "pe": 5.0}
+               for r in sig["ladder"]]
+    lines = ex.manage({"NIFTY": crashed}, now_hhmm="11:00", db_path=db,
+                      expiries={"NIFTY": "17NOV2026"})
+    assert lines == [], "nothing may close on another contract's quote"
+    assert set(asked) == {"23NOV2026"}, "it asks for the position's own expiry"
+    assert ex.results(db_path=db)["open"] == 2
+
+
+def test_the_right_expirys_ladder_is_used_directly(db, monkeypatch):
+    from intraday_advisor import index_options
+
+    def forbidden(*a, **k):
+        raise AssertionError("no lookup needed when the ladder matches")
+
+    monkeypatch.setattr(index_options, "get_option_premium", forbidden)
+    sig = signal()
+    ex.open_pair(sig, ex.pick_spread(sig["ladder"], sig["spot"], "CALL"),
+                 db_path=db)
+    assert ex.manage({"NIFTY": sig["ladder"]}, now_hhmm="11:00", db_path=db,
+                     expiries={"NIFTY": "23NOV2026"}) == []
+
+
+def test_an_estimated_chain_never_closes_anything(db, monkeypatch):
+    """Regression, 2026-11-17 10:56. The first snapshot after a restart
+    arrived before the broker login finished, carrying the estimated chain --
+    right expiry, invented prices -- and six positions were closed on it in one
+    second, at Rs 0.50 and Rs 2.46."""
+    from intraday_advisor import index_options
+
+    monkeypatch.setattr(index_options, "get_option_premium",
+                        lambda *a, **k: (0.5, "Estimated (market closed or API unavailable)"))
+    sig = signal()
+    ex.open_pair(sig, ex.pick_spread(sig["ladder"], sig["spot"], "CALL"),
+                 db_path=db)
+    invented = [{"strike": r["strike"], "ce": 0.5, "pe": 0.5}
+                for r in sig["ladder"]]
+    lines = ex.manage({"NIFTY": invented}, now_hhmm="11:00", db_path=db,
+                      expiries={"NIFTY": "23NOV2026"}, live={"NIFTY": False})
+    assert lines == []
+    assert ex.results(db_path=db)["open"] == 2
+
+
+def test_only_the_live_feed_counts_as_a_source():
+    assert ex._is_live_source("Angel One live (LTP + OI)")
+    assert ex._is_live_source("Angel One LTP (live)")
+    assert not ex._is_live_source("Estimated (market closed or API unavailable)")
+    assert not ex._is_live_source(None)

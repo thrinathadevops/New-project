@@ -125,13 +125,36 @@ def _num(value, default: float = 0.0) -> float:
     return default if (result != result or result in (float("inf"), float("-inf"))) else result
 
 
-def analyse_underlying(df: pd.DataFrame) -> tuple[SignalScore | None, dict, list[str]]:
-    """Score the index underlying from its last CLOSED candle.
+_UNDERLYING_CACHE: dict = {}
 
-    Returns ``(score, feature_row, warnings)``. The feature row is handed
-    straight to the ledger, so what gets graded is exactly what was scored.
-    ``None`` means there were not enough candles to form a view.
+
+def analyse_underlying(df: pd.DataFrame) -> tuple[SignalScore | None, dict, list[str]]:
+    """Score the index underlying from its last CLOSED candle. Memoised.
+
+    The answer depends only on closed candles, and a closed candle cannot
+    change -- yet every refresh re-ran all 37 indicators over the same frame,
+    about five seconds of a snapshot spent recomputing an identical result.
+    Keyed on the frame's length, last timestamp and last close, so a new bar
+    (or a revised one) misses the cache and is computed afresh.
     """
+    try:
+        key = (len(df), str(df.index[-1]), round(float(df["Close"].iloc[-1]), 4),
+               round(float(df["Close"].iloc[0]), 4))
+    except Exception:  # noqa: BLE001 - an odd frame just skips the cache
+        key = None
+    if key is not None and key in _UNDERLYING_CACHE:
+        score, row, warns = _UNDERLYING_CACHE[key]
+        return score, dict(row), list(warns)
+    result = _analyse_underlying(df)
+    if key is not None:
+        if len(_UNDERLYING_CACHE) > 16:
+            _UNDERLYING_CACHE.clear()
+        _UNDERLYING_CACHE[key] = result
+    return result[0], dict(result[1]), list(result[2])
+
+
+def _analyse_underlying(df: pd.DataFrame) -> tuple[SignalScore | None, dict, list[str]]:
+    """The uncached computation behind :func:`analyse_underlying`."""
     enriched = apply_ema_swing_breakout_strategy(add_indicators(df))
     usable = enriched.dropna(subset=["Close", "EMA9", "EMA21", "ATR14"])
     if usable.empty:

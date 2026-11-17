@@ -29,3 +29,8 @@ data/event_calendar.json
 # clientcode, PIN and TOTP -- into its error logs on a failed login, so the
 # whole directory is excluded, not just *.csv as before.
 logs/
+
+# Angel's daily instrument list: large, generated, refetched each day.
+data/instrument_master.json
+data/instrument_master.tmp
+data/experiment.sqlite*

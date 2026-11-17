@@ -224,7 +224,8 @@ def test_clean_trade_passes():
     ({"regime_bias": "DOWN", "regime_conviction": 70}, "fights an aligned trend"),
     ({"data_is_live": False}, "estimated data is not tradable"),
     ({"minutes_to_square_off": 0}, "no time left"),
-    ({"measured_expectancy": -180.0}, "measured to lose money"),
+    ({"measured_expectancy": -180.0, "expectancy_established": True},
+     "measured to lose money, and it holds up session by session"),
 ])
 def test_structural_problems_are_vetoed(overrides, reason):
     verdict = RuleAgent().review(a_brief(**overrides))

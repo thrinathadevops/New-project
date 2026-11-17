@@ -425,7 +425,12 @@ def scan_async(mode: str = "nifty50", **kwargs) -> dict:
 
         def worker():
             try:
-                result = screen_universe(mode, force=True, **kwargs)
+                # In another PROCESS: a thread doing a minute of pandas holds
+                # the interpreter lock and starves the snapshot loop even
+                # though it is "in the background". See offload.py.
+                from intraday_advisor import offload
+
+                result = offload.call(screen_universe, mode, force=True, **kwargs)
             except Exception as exc:  # noqa: BLE001
                 result = {"rows": [], "error": str(exc)[:200], "mode": mode}
             with _SCAN_LOCK:

@@ -652,6 +652,23 @@ function renderVerdict(snapshot) {
   setText($('verdict-detail'), advice.detail || '');
   setText($('verdict-change'), advice.what_would_change_it || '');
 
+  // The recent run, session by session. This is what makes the banner move:
+  // the sentence above only changes when a day is graded, and each day adds
+  // one entry here.
+  const recent = $('verdict-recent');
+  if (recent) {
+    recent.innerHTML = (advice.recent || []).map((r) => {
+      const up = r.per_signal > 0;
+      return `<span class="session-chip session-chip--${up ? 'up' : 'down'}"
+          title="${r.signals} signals graded">
+        <span class="session-chip__day">${escapeHtml(String(r.session).slice(5))}</span>
+        <b>${up ? '▲ +' : '▼ −'}₹${Math.abs(r.per_signal).toFixed(0)}</b>
+      </span>`;
+    }).join('') + (advice.pending_today
+      ? `<span class="session-chip session-chip--pending">today
+           <b>${advice.pending_today} waiting</b></span>` : '');
+  }
+
   // The one pattern in this ledger strong enough to act on.
   const hours = advice.worst_hours || [];
   setText($('verdict-hours'), hours.length

@@ -161,6 +161,11 @@ class TradeBrief:
     data_is_live: bool = False
     graded_trades: int = 0
     measured_expectancy: float | None = None
+    #: True only when the loss holds up counted by SESSION -- the whole range
+    #: of the session average is below zero. A negative per-trade average over
+    #: a handful of days is not that, and vetoing on it vetoed every trade.
+    expectancy_established: bool = False
+    record_summary: str = ""
 
     readings: list[dict] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -266,6 +271,8 @@ def brief_from_snapshot(
         data_is_live=snapshot.get("mode") == "LIVE",
         graded_trades=int(performance.get("trades") or 0),
         measured_expectancy=performance.get("expectancy"),
+        expectancy_established=bool((ledger.get("advice") or {}).get("established")),
+        record_summary=str((ledger.get("advice") or {}).get("headline") or ""),
         readings=signal.get("readings") or [],
         warnings=list(signal.get("warnings") or []),
     )

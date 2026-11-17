@@ -229,17 +229,63 @@ def open_pair(signal: dict, spread: dict, *, db_path: str = DB_PATH) -> str:
     return pair
 
 
-def _premium(ladder_by_index: dict, index: str, strike: float, side: str):
-    row = next((r for r in ladder_by_index.get(index, [])
-                if r["strike"] == strike), None)
-    if row is None:
+def _is_live_source(source) -> bool:
+    """Whether a quote's stated source is the broker's live feed."""
+    return "live" in str(source or "").lower()
+
+
+def _premium(ladders: dict, expiries: dict, index: str, strike: float,
+             side: str, expiry: str | None, live: dict | None = None):
+    """This contract's price, from ITS OWN expiry -- or None.
+
+    The desk's ladder is for whichever expiry the dashboard is showing. On
+    2026-11-17 a dashboard restart reset that to the contract expiring the same
+    day, and this function -- which then matched on strike alone -- priced
+    next week's 25400 call at the expiring one's Rs 57.65. It closed two longs
+    at "stops" worth Rs 17,744 of loss that never happened, and one spread at a
+    "target" it had not reached.
+
+    So the ladder is used only when its expiry is the position's. Otherwise the
+    contract is looked up by its own expiry; if that fails the price is
+    unknown and nothing is closed.
+
+    And only **live** quotes count. The same morning, the first snapshot after
+    another restart arrived before the broker login had finished, so its chain
+    was the estimated model -- right expiry, invented prices (Rs 0.50, Rs 2.46).
+    Six positions were closed on it in one second. A modelled price is not a
+    price anything traded at, so a ladder not marked live, or a lookup whose
+    source is not the live feed, is treated as no price at all.
+    """
+    ladder_live = True if live is None else bool(live.get(index))
+    if (ladder_live and expiry
+            and str(expiries.get(index) or "").upper() == str(expiry).upper()):
+        row = next((r for r in ladders.get(index, [])
+                    if r["strike"] == strike), None)
+        if row is not None:
+            price = float(row.get("ce" if side == "CE" else "pe") or 0)
+            if price > 0:
+                return price
+    if not expiry:
         return None
-    price = float(row.get("ce" if side == "CE" else "pe") or 0)
-    return price if price > 0 else None
+    try:
+        from intraday_advisor.index_options import get_option_premium
+
+        price, source = get_option_premium(index, strike, side, expiry=expiry)
+        if not _is_live_source(source):
+            return None
+        return float(price) if price and price > 0 else None
+    except Exception as exc:  # noqa: BLE001
+        LOG.debug("No price for %s %s %s %s: %s", index, strike, side, expiry, exc)
+        return None
 
 
-def manage(ladders: dict, *, now_hhmm: str, db_path: str = DB_PATH) -> list[str]:
-    """Close whatever has hit its exit. Returns one line per close."""
+def manage(ladders: dict, *, now_hhmm: str, db_path: str = DB_PATH,
+           expiries: dict | None = None, live: dict | None = None) -> list[str]:
+    """Close whatever has hit its exit. Returns one line per close.
+
+    ``expiries`` maps each index to the expiry its ladder belongs to.
+    """
+    expiries = expiries or {}
     from intraday_advisor.ledger.structures import (
         MULTI, close_structure, load_open_structures)
     from intraday_advisor.positions import close_position, load_open_positions
@@ -248,8 +294,8 @@ def manage(ladders: dict, *, now_hhmm: str, db_path: str = DB_PATH) -> list[str]
     for position in load_open_positions(db_path=db_path):
         if position.option_type == MULTI:
             continue
-        now = _premium(ladders, position.index_name, position.strike,
-                       position.option_type)
+        now = _premium(ladders, expiries, position.index_name, position.strike,
+                       position.option_type, position.expiry, live)
         reason = long_exit(position.entry_premium, now, now_hhmm=now_hhmm)
         if reason:
             result = close_position(position.position_id, exit_premium=now,
@@ -262,9 +308,10 @@ def manage(ladders: dict, *, now_hhmm: str, db_path: str = DB_PATH) -> list[str]
 
     for structure in load_open_structures(db_path=db_path):
         exits, value = {}, 0.0
+        leg_expiry = _parse_note(structure.notes).get("expiry")
         for leg in structure.legs:
-            price = _premium(ladders, structure.index_name, leg.strike,
-                             leg.option_type)
+            price = _premium(ladders, expiries, structure.index_name,
+                             leg.strike, leg.option_type, leg_expiry, live)
             if price is None:
                 exits = None
                 break
@@ -430,8 +477,14 @@ async def _follow(ws, db_path: str) -> None:
         signals = message.get("signals") or []
         ladders = {s["index"]: s.get("ladder") or [] for s in signals}
 
-        for line in manage(ladders, now_hhmm=now_hhmm, db_path=db_path):
-            LOG.info("%s closed %s", now_hhmm, line)
+        expiries = {s["index"]: s.get("expiry") for s in signals}
+        trading = (bool(message.get("market_open"))
+                   and str(message.get("mode") or "") == "LIVE")
+        live = {s["index"]: trading and bool(s.get("is_live")) for s in signals}
+        if trading:                      # nothing is managed off-hours
+            for line in manage(ladders, now_hhmm=now_hhmm, db_path=db_path,
+                               expiries=expiries, live=live):
+                LOG.info("%s closed %s", now_hhmm, line)
 
         pairs_today, last_entry = todays_entries(
             db_path=db_path, today=message["ts"][:10])

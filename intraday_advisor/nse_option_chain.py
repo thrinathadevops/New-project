@@ -32,18 +32,72 @@ INSTRUMENT_MASTER_URL = (
 
 _INSTRUMENT_CACHE: pd.DataFrame | None = None
 
+#: The master is published once a day and runs to tens of megabytes. It was
+#: downloaded afresh by every process on every start, which is most of why a
+#: cold start took about a minute -- and on a slow connection it simply hung,
+#: with the dashboard showing nothing until it finished.
+INSTRUMENT_FILE = "data/instrument_master.json"
+INSTRUMENT_MAX_AGE_HOURS = 18.0
+
+
+def _instrument_file_is_fresh(path) -> bool:
+    import time
+    try:
+        age = time.time() - path.stat().st_mtime
+        return path.stat().st_size > 1_000_000 and age < INSTRUMENT_MAX_AGE_HOURS * 3600
+    except OSError:
+        return False
+
 
 def _load_instruments() -> pd.DataFrame:
+    """Angel's instrument master: memory, then today's file, then the network.
+
+    A stale file is still used if the download fails -- yesterday's token list
+    is right for every contract that existed yesterday, and that beats having
+    no chain at all.
+    """
     global _INSTRUMENT_CACHE
     if _INSTRUMENT_CACHE is not None and len(_INSTRUMENT_CACHE) > 0:
         return _INSTRUMENT_CACHE
+
+    import json
+    from pathlib import Path
+
+    path = Path(INSTRUMENT_FILE)
+    if _instrument_file_is_fresh(path):
+        try:
+            df = pd.DataFrame(json.loads(path.read_text(encoding="utf-8")))
+            if len(df) > 0:
+                _INSTRUMENT_CACHE = df
+                return df
+        except Exception as exc:  # noqa: BLE001 - a bad file falls through
+            logger.debug("Instrument file unreadable, refetching: %s", exc)
+
     try:
         resp = requests.get(INSTRUMENT_MASTER_URL, timeout=30)
         resp.raise_for_status()
         df = pd.DataFrame(resp.json())
         _INSTRUMENT_CACHE = df
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_suffix(".tmp")
+            temp.write_text(resp.text, encoding="utf-8")
+            temp.replace(path)          # atomic: never a half-written file
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Could not save the instrument master: %s", exc)
         return df
     except Exception as e:
+        if path.exists():
+            try:
+                df = pd.DataFrame(json.loads(path.read_text(encoding="utf-8")))
+                if len(df) > 0:
+                    logger.warning(
+                        "Instrument download failed (%s); using the saved "
+                        "copy from an earlier day.", e)
+                    _INSTRUMENT_CACHE = df
+                    return df
+            except Exception:  # noqa: BLE001
+                pass
         raise RuntimeError(f"Failed to load Angel One instrument master: {e}")
 
 
@@ -475,8 +529,44 @@ def _pin_read(ce_wall, pe_wall, max_pain, spot, step) -> dict:
         return {}
 
 
+#: How long one fetched chain is reused. A snapshot asked for the same chain
+#: EIGHT times -- once to analyse each index, once more for its alternative
+#: contracts, and once per open position to price it -- and each call was a
+#: fresh broker request plus an instrument-master scan: 10 of a 17-second
+#: snapshot, growing by a second for every position held. Within a few
+#: seconds those are the same quotes, so the first answer is shared.
+_CHAIN_TTL = 6.0
+_CHAIN_CACHE: dict = {}
+_CHAIN_LOCK = __import__("threading").Lock()
+
+
 def suggest_option_trade(symbol: str, spot: float = 0.0,
                          expiry: str | None = None) -> dict:
+    """The option chain and its read, shared across callers for a few seconds.
+
+    See :data:`_CHAIN_TTL`. The cached result is returned as a shallow copy so
+    one caller adding a key cannot change what the next one sees; the chain
+    table itself is shared and is treated as read-only everywhere.
+    """
+    import time as _time
+
+    key = (symbol.upper(), (expiry or "").upper())
+    now = _time.time()
+    with _CHAIN_LOCK:
+        hit = _CHAIN_CACHE.get(key)
+        if hit and (now - hit[0]) < _CHAIN_TTL:
+            return dict(hit[1])
+    result = _suggest_option_trade(symbol, spot=spot, expiry=expiry)
+    with _CHAIN_LOCK:
+        _CHAIN_CACHE[key] = (_time.time(), result)
+        if len(_CHAIN_CACHE) > 32:
+            oldest = min(_CHAIN_CACHE, key=lambda k: _CHAIN_CACHE[k][0])
+            _CHAIN_CACHE.pop(oldest, None)
+    return dict(result)
+
+
+def _suggest_option_trade(symbol: str, spot: float = 0.0,
+                          expiry: str | None = None) -> dict:
     """
     Analyse Any Equity/Index option chain and suggest CALL or PUT.
     Tries: Angel One LTP → falls back to synthetic model.

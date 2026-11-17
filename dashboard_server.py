@@ -363,6 +363,7 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
                     costs=getattr(engine, "_costs", None),
                     event_risk=snapshot.get("event_risk"),
                     performance=(snapshot.get("ledger") or {}).get("performance"),
+                    advice=(snapshot.get("ledger") or {}).get("advice"),
                     minutes_to_square_off=snapshot.get("minutes_to_square_off"),
                     mode=(snapshot.get("mode", "") if snapshot.get("market_open")
                           else "CLOSED"),
