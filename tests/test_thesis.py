@@ -318,3 +318,17 @@ def test_the_expiry_is_stored_with_the_position(tmp_path):
                   lot_size=65, lots=1, entry_premium=194.0,
                   expiry="24nov2026", db_path=db)
     assert load_open_positions(db_path=db)[0].expiry == "24NOV2026"
+
+
+def test_the_regimes_own_up_down_spelling_is_understood():
+    """Found live on 2026-11-17: the regime reports UP / DOWN, the check
+    matched BULLISH / BEARISH, and every trend row read "no clear lean"."""
+    up = brief(regime={"regime": "TRENDING_UP", "bias": "UP", "conviction": 52})
+    assert state_of(up, "trend") == PASS
+    against = brief(regime={"regime": "TRENDING_DOWN", "bias": "DOWN",
+                            "conviction": 70})
+    assert state_of(against, "trend") == FAIL
+    put = brief(direction="PUT", option_type="PE", underlying_score=20,
+                regime={"regime": "TRENDING_DOWN", "bias": "DOWN",
+                        "conviction": 70})
+    assert state_of(put, "trend") == PASS

@@ -113,13 +113,17 @@ def _trend(signal: dict, bullish: bool) -> dict:
     bias = str(regime.get("bias") or "NEUTRAL").upper()
     name = str(regime.get("regime") or "UNKNOWN").replace("_", " ").title()
     conviction = _num(regime.get("conviction"), 0) or 0
-    want = "BULLISH" if bullish else "BEARISH"
-    against = "BEARISH" if bullish else "BULLISH"
-    if want in bias:
+    # The regime spells its lean UP / DOWN; other callers say BULLISH /
+    # BEARISH. Matching only the second pair made every live trend row read
+    # "no clear lean" -- found on the first live session, 2026-11-17.
+    up = any(word in bias for word in ("BULLISH", "UP"))
+    down = any(word in bias for word in ("BEARISH", "DOWN"))
+    want, against = (up, down) if bullish else (down, up)
+    if want and not against:
         return _check("trend", "Market trend", PASS,
                       f"{name}, leaning the same way as this trade "
                       f"({conviction:.0f}% of timeframe inputs agree).")
-    if against in bias:
+    if against and not want:
         return _check("trend", "Market trend", FAIL,
                       f"{name}, leaning AGAINST this trade "
                       f"({conviction:.0f}% agreement). Buying into a trend "
