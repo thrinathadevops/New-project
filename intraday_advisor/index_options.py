@@ -373,7 +373,19 @@ def analyze_index_option(
     )
 
 
-def get_option_premium(index: str, strike: float | int, option_type: str, spot: float = 0.0) -> tuple[float, str]:
+def expiry_has_passed(expiry: str | None, today=None) -> bool:
+    """Whether an expiry label such as ``17NOV2026`` is before today."""
+    if not expiry:
+        return False
+    try:
+        day = datetime.strptime(str(expiry).upper(), "%d%b%Y").date()
+    except ValueError:
+        return False
+    return day < (today or datetime.now().date())
+
+
+def get_option_premium(index: str, strike: float | int, option_type: str,
+                       spot: float = 0.0, expiry: str | None = None) -> tuple[float, str]:
     """Live premium for a specific strike/type of a held position.
 
     Returns ``(premium, data_source)``. Used by the position monitor on every
@@ -386,7 +398,12 @@ def get_option_premium(index: str, strike: float | int, option_type: str, spot: 
     exist, and fired a STOP HIT alarm telling you to exit a position on the
     strength of someone else's quote. An unknown price has to read as unknown.
     """
-    chain = suggest_option_trade(index.upper(), spot=spot)
+    # The contract's OWN expiry. The same strike in another week is a different
+    # contract at a different price; once its expiry has passed there is no
+    # quote at all, and saying so beats quoting next week's option as this one.
+    if expiry_has_passed(expiry):
+        return 0.0, f"expired {expiry} — settle it with your broker and close it here"
+    chain = suggest_option_trade(index.upper(), spot=spot, expiry=expiry or None)
     col = "ce_ltp" if str(option_type).upper() == "CE" else "pe_ltp"
     df = chain.get("df")
     if df is not None and not df.empty and "strike" in df.columns:

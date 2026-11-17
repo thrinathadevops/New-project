@@ -188,3 +188,133 @@ def test_a_strike_missing_from_the_chain_is_unknown_not_the_atm_price(monkeypatc
     assert "unknown" in source
     assert index_options.get_option_premium("NIFTY", 25300, "CE")[0] == 82.0
 
+
+
+# ================================================= accuracy: delta and quotes ==
+
+from intraday_advisor.thesis import ATM_DELTA, option_delta, quote_leg
+
+
+def test_an_at_the_money_option_has_a_delta_near_a_half():
+    delta, basis = option_delta(spot=25300, strike=25300, premium=194.0,
+                                days_to_expiry=4, option_type="CE")
+    assert 0.45 <= delta <= 0.60
+    assert "own price" in basis
+
+
+def test_a_far_wing_has_a_much_smaller_delta_than_the_old_assumption():
+    """The point of the change. At an assumed 0.5 a cheap wing's target looked
+    about three times closer than it is."""
+    delta, _ = option_delta(spot=25300, strike=25800, premium=12.0,
+                            days_to_expiry=4, option_type="CE")
+    assert delta < 0.25
+    assert delta < ATM_DELTA / 2
+
+
+def test_a_put_is_measured_on_its_own_side():
+    itm_put, _ = option_delta(spot=25300, strike=25600, premium=330.0,
+                              days_to_expiry=4, option_type="PE")
+    otm_put, _ = option_delta(spot=25300, strike=25000, premium=40.0,
+                              days_to_expiry=4, option_type="PE")
+    assert itm_put > otm_put
+
+
+def test_no_price_or_expiry_falls_back_and_says_so():
+    delta, basis = option_delta(spot=25300, strike=25300, premium=None,
+                                days_to_expiry=0, option_type="CE")
+    assert delta == ATM_DELTA
+    assert "assumed" in basis
+
+
+def test_any_strike_gets_exact_costs_and_its_own_checks():
+    """A contract you chose yourself is the one most worth checking; it used
+    to be the only one with no analysis behind it."""
+    quote = quote_leg(signal(direction="WAIT"), strike=25400.0,
+                      option_type="CE", premium=150.0, lots=2,
+                      target_pct=0.25, stop_pct=0.20,
+                      available_capital=200_000, mode="LIVE")
+    plan = quote["plan"]
+    assert plan["lots"] == 2 and plan["quantity"] == 130
+    assert plan["round_trip_cost"] > 0
+    assert plan["breakeven"] > 150.0, "costs must lift the breakeven"
+    assert quote["thesis"]["checks"], "the leg is analysed, not waved through"
+    assert any("your own decision" in n for n in quote["notes"])
+
+
+def test_a_leg_against_the_engine_is_called_out():
+    quote = quote_leg(signal(), strike=25300.0, option_type="PE",
+                      premium=180.0, lots=1, target_pct=0.25, stop_pct=0.20,
+                      available_capital=200_000, mode="LIVE")
+    assert any("AGAINST" in n for n in quote["notes"])
+    assert quote["is_engine_contract"] is False
+
+
+def test_the_agents_verdict_is_not_borrowed_for_another_contract():
+    """A VETO was about the engine's contract. Carrying it onto a different
+    strike would report an objection nobody actually made about it."""
+    vetoed = signal(agent={"stance": "VETO", "concerns": ["Costs."]})
+    other = quote_leg(vetoed, strike=25500.0, option_type="CE", premium=90.0,
+                      lots=1, target_pct=0.25, stop_pct=0.20,
+                      available_capital=200_000, mode="LIVE")
+    same = quote_leg(vetoed, strike=25300.0, option_type="CE", premium=194.0,
+                     lots=1, target_pct=0.25, stop_pct=0.20,
+                     available_capital=200_000, mode="LIVE")
+    assert "Risk checklist" not in other["thesis"]["blockers"]
+    assert "Risk checklist" in same["thesis"]["blockers"]
+
+
+def test_an_order_larger_than_the_capital_is_flagged_not_resized():
+    quote = quote_leg(signal(), strike=25300.0, option_type="CE",
+                      premium=194.0, lots=10, target_pct=0.25, stop_pct=0.20,
+                      available_capital=20_000, mode="LIVE")
+    assert quote["plan"]["lots"] == 10, "price what was asked for"
+    assert quote["plan"]["affordable"] is False
+    assert any("needs" in n for n in quote["notes"])
+
+
+def test_a_leg_without_a_premium_reports_rather_than_raises():
+    quote = quote_leg(signal(), strike=25300.0, option_type="CE", premium=0,
+                      lots=1, target_pct=0.25, stop_pct=0.20,
+                      available_capital=20_000)
+    assert "error" in quote
+
+
+# ====================================================== a position's expiry ==
+
+def test_an_expired_contract_has_no_quote(monkeypatch):
+    from intraday_advisor import index_options
+
+    def forbidden(*a, **k):
+        raise AssertionError("an expired contract must not be looked up")
+
+    monkeypatch.setattr(index_options, "suggest_option_trade", forbidden)
+    premium, source = index_options.get_option_premium(
+        "NIFTY", 24650, "CE", expiry="06NOV2020")
+    assert premium == 0.0
+    assert "expired" in source
+
+
+def test_a_position_is_priced_from_its_own_expiry(monkeypatch):
+    """The same strike in another week is a different contract."""
+    from intraday_advisor import index_options
+
+    seen = {}
+
+    def chain(index, spot=0.0, expiry=None):
+        seen["expiry"] = expiry
+        return {"df": pd.DataFrame({"strike": [25300.0], "ce_ltp": [82.0],
+                                    "pe_ltp": [75.0]}), "data_source": "live"}
+
+    monkeypatch.setattr(index_options, "suggest_option_trade", chain)
+    index_options.get_option_premium("NIFTY", 25300, "CE", expiry="24NOV2099")
+    assert seen["expiry"] == "24NOV2099"
+
+
+def test_the_expiry_is_stored_with_the_position(tmp_path):
+    from intraday_advisor.positions import load_open_positions, open_position
+
+    db = str(tmp_path / "ledger.sqlite")
+    open_position(index_name="NIFTY", option_type="CE", strike=25300,
+                  lot_size=65, lots=1, entry_premium=194.0,
+                  expiry="24nov2026", db_path=db)
+    assert load_open_positions(db_path=db)[0].expiry == "24NOV2026"

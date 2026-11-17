@@ -38,10 +38,54 @@ PASS, FAIL, NEUTRAL = "pass", "fail", "neutral"
 #: one point on a ~30% probability, well inside what anyone should act on.
 LIVE_REPLAYS = 2_000
 
-#: An at-the-money option moves about half as far as its underlying. Used only
-#: to translate the premium stop and target into index levels for the replay,
-#: and labelled as an approximation wherever it is shown.
+#: Fallback when a contract's own delta cannot be computed. An at-the-money
+#: option moves about half as far as its underlying -- true only at the money,
+#: which is why :func:`option_delta` is used wherever a price is available.
 ATM_DELTA = 0.5
+
+#: Deltas outside this band are clamped. Below it the replay would need an
+#: index move so large that every path ends "undecided"; a deep wing's delta is
+#: also the least stable number Black-Scholes produces.
+MIN_DELTA, MAX_DELTA = 0.08, 0.95
+
+
+def option_delta(*, spot, strike, premium, days_to_expiry, option_type) -> tuple:
+    """This contract's own delta, from its own traded price.
+
+    Returns ``(delta, basis)`` where delta is a positive magnitude.
+
+    The first version of the odds check used 0.5 for every contract. That is
+    right at the money and wrong everywhere else, in the direction that
+    flatters cheap options: a Rs 12 wing with a real delta near 0.15 needs
+    about **three times** the index move the 0.5 assumption gave it, so its
+    target looked far more reachable than it is. The implied volatility is
+    backed out of the contract's premium (bisection, as elsewhere here) and
+    the delta read off that, so the translation from premium to index levels
+    uses the option actually being bought.
+    """
+    import math
+
+    spot_v, strike_v = _num(spot), _num(strike)
+    price, days = _num(premium), _num(days_to_expiry)
+    if not (spot_v and strike_v and price and days and days > 0):
+        return ATM_DELTA, "assumed 0.50 (no price or expiry to compute it from)"
+    try:
+        from intraday_advisor.options_math import (
+            RISK_FREE_RATE, _norm_cdf, implied_vol)
+
+        years = days / 365.0
+        vol = implied_vol(price, spot_v, strike_v, years, option_type)
+        if not vol or vol <= 0:
+            return ATM_DELTA, "assumed 0.50 (price implies no sane volatility)"
+        d1 = (math.log(spot_v / strike_v)
+              + (RISK_FREE_RATE + vol * vol / 2.0) * years) / (vol * math.sqrt(years))
+        call = _norm_cdf(d1)
+        raw = call if str(option_type).upper() == "CE" else 1.0 - call
+        delta = min(MAX_DELTA, max(MIN_DELTA, raw))
+        return round(delta, 3), f"delta {delta:.2f} from this contract's own price"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Delta unavailable: %s", exc)
+        return ATM_DELTA, "assumed 0.50 (could not be computed)"
 
 _ODDS_CACHE: dict = {}
 
@@ -304,8 +348,13 @@ def _odds(signal: dict, bullish: bool, minutes_left, db_path) -> dict | None:
         from intraday_advisor.index_options import INDEX_CONFIG
 
         bars = pool_bars(INDEX_CONFIG[signal["index"]]["yahoo"], db_path=db_path)
-        up = (target - entry) / ATM_DELTA
-        down = (entry - stop) / ATM_DELTA
+        delta, delta_basis = option_delta(
+            spot=spot, strike=signal.get("strike"), premium=entry,
+            days_to_expiry=(signal.get("volatility") or {}).get("days_to_expiry"),
+            option_type=signal.get("option_type") or ("CE" if bullish else "PE"),
+        )
+        up = (target - entry) / delta
+        down = (entry - stop) / delta
         minutes = _num(minutes_left, 200) or 200
         result = assess(
             bars, entry_premium=entry, stop_premium=stop,
@@ -333,7 +382,8 @@ def _odds(signal: dict, bullish: bool, minutes_left, db_path) -> dict | None:
             f"first {hit:.0f}% of the time it was decided; costs demand "
             f"{need:.0f}%. That is {gap:+.1f} points"
             f"{' — and ' + format(open_share, '.0f') + '% of replays reached the close undecided' if open_share > 40 else ''}"
-            f". (Index levels approximated at delta {ATM_DELTA}.)"
+            f". The index must move about {up:,.0f} points for the target "
+            f"and {down:,.0f} against for the stop ({delta_basis})."
         )
         state = PASS if gap >= 5 else FAIL if gap <= -5 else NEUTRAL
         check = _check("odds", "Measured odds", state, detail)
@@ -397,8 +447,10 @@ def build_thesis(
     if mode and mode != "LIVE":
         checks.insert(0, _check(
             "data", "Data", FAIL,
-            "Prices are estimated or the market is closed. Nothing on this "
-            "screen is tradeable until live data returns.", blocker=True))
+            ("The market is closed — these are the last traded prices, not "
+             "ones you can trade at." if mode == "CLOSED" else
+             "Prices are estimated. Nothing on this screen is tradeable "
+             "until live data returns."), blocker=True))
 
     passed = [c for c in checks if c["state"] == PASS]
     failed = [c for c in checks if c["state"] == FAIL]
@@ -452,6 +504,97 @@ _DISCLAIMER = (
     "Agreement is how many of the checks support the trade. It is not the "
     "chance of profit — no analysis makes an intraday option trade certain."
 )
+
+
+def quote_leg(
+    signal: dict, *, strike: float, option_type: str, premium: float,
+    lots: int, target_pct: float, stop_pct: float, available_capital: float,
+    costs=None, event_risk: dict | None = None, performance: dict | None = None,
+    minutes_to_square_off=None, mode: str = "", db_path=None,
+) -> dict:
+    """Exact numbers and a brief for ANY contract, not only the engine's.
+
+    The order ticket first showed a flat fee estimate and, for any strike the
+    engine had not named, the sentence "its costs and odds were not analysed".
+    That left the contracts most worth checking -- the ones you chose yourself
+    -- as the only ones with no analysis behind them. This runs the same cost
+    model, sizing and checks on whatever leg is in the ticket.
+
+    The index context (trend, chain, events, record) is the signal's; the
+    contract-specific rows (costs, risk, odds, time) are recomputed for this
+    leg. The agent's verdict is carried over only when the leg *is* the
+    engine's contract, because that verdict was about that contract.
+    """
+    from intraday_advisor.ledger.sizing import plan_position
+
+    side = str(option_type or "CE").upper()
+    direction = "CALL" if side == "CE" else "PUT"
+    entry = float(premium)
+    lots = max(1, int(lots))
+    lot_size = int(signal.get("lot_size") or 0)
+    stop = round(entry * (1 - float(stop_pct)), 2)
+    target = round(entry * (1 + float(target_pct)), 2)
+    out: dict = {"index": signal.get("index"), "strike": float(strike),
+                 "option_type": side, "premium": entry, "lots": lots,
+                 "stop_premium": stop, "target_premium": target, "notes": []}
+    if entry <= 0 or lot_size <= 0:
+        out["error"] = "A premium and a lot size are needed to price this."
+        return out
+
+    needed = entry * lot_size * lots
+    # Sized at the lots ASKED for: the question in the ticket is "what does
+    # this order cost me", not "what would you have sized".
+    try:
+        plan = plan_position(
+            available_capital=max(float(available_capital or 0), needed),
+            entry_premium=entry, stop_premium=stop, target_premium=target,
+            lot_size=lot_size, max_lots=lots, costs=costs,
+        ).as_dict()
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = f"Could not size this order: {exc}"
+        return out
+
+    capital = float(available_capital or 0)
+    if capital:
+        plan["risk_pct_of_capital"] = round(plan["risk_amount"] / capital, 4)
+        plan["affordable"] = needed <= capital
+        if needed > capital:
+            out["notes"].append(
+                f"This order needs ₹{needed:,.0f}; the capital set is "
+                f"₹{capital:,.0f}.")
+    out["plan"] = {k: plan.get(k) for k in (
+        "lots", "quantity", "deployed_capital", "risk_amount", "reward_amount",
+        "risk_pct_of_capital", "net_rr", "cost_drag", "breakeven",
+        "round_trip_cost", "affordable", "stop_protects_gain", "locked_gain")}
+
+    same = (float(signal.get("strike") or 0) == float(strike)
+            and str(signal.get("option_type") or "").upper() == side
+            and str(signal.get("direction") or "").upper() == direction)
+    leg = dict(signal)
+    leg.update({
+        "direction": direction, "option_type": side, "strike": float(strike),
+        "entry_premium": entry, "stop_premium": stop, "target_premium": target,
+        "plan": plan,
+        "agent": signal.get("agent") if same else {
+            "stance": "", "concerns": []},
+    })
+    thesis = build_thesis(
+        leg, event_risk=event_risk, performance=performance,
+        minutes_to_square_off=minutes_to_square_off, mode=mode, db_path=db_path)
+    engine_direction = str(signal.get("direction") or "WAIT").upper()
+    if engine_direction not in ("CALL", "PUT"):
+        out["notes"].append(
+            f"The engine reads no trade on {signal.get('index')} right now — "
+            f"this order is your own decision, not a signal.")
+    elif engine_direction != direction:
+        out["notes"].append(
+            f"This is AGAINST the engine's {engine_direction} read.")
+    elif not same:
+        out["notes"].append(
+            f"Same direction as the engine's read, on a different strike.")
+    out["thesis"] = thesis
+    out["is_engine_contract"] = same
+    return out
 
 
 def ladder(chain: dict, *, around: int = 6) -> list[dict]:

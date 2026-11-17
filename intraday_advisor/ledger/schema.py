@@ -436,6 +436,13 @@ ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("agent_provider", "TEXT"),
         ("agent_degraded", "INTEGER"),
     ],
+    "positions": [
+        # Which expiry the contract belongs to. Without it a held position was
+        # priced off whatever expiry the chain currently defaulted to, so the
+        # same strike in a different week -- a different contract at a
+        # different price -- silently became "its" quote after a rollover.
+        ("expiry", "TEXT"),
+    ],
     "daily_record": [
         # Per-index spot moves. The scalar `spot_move_pct` columns are NIFTY's;
         # this keeps BANKNIFTY rather than discarding it, and exists because

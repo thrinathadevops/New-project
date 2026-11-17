@@ -598,9 +598,12 @@ class Engine:
                 source = f"live tick ({tick_age:.0f}s ago)"
             else:
                 try:
+                    extra = ({"expiry": position.expiry}
+                             if getattr(position, "expiry", "") else {})
                     premium, source = get_option_premium(
                         position.index_name, position.strike, position.option_type,
                         spot=spot_by_index.get(position.index_name, 0) or 0,
+                        **extra,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug("Premium fetch failed for %s: %s",
@@ -893,7 +896,9 @@ class Engine:
                         "performance"),
                     minutes_to_square_off=snapshot_so_far.get(
                         "minutes_to_square_off"),
-                    mode=mode, db_path=self.db_path,
+                    # The broker keeps answering after the close, so "LIVE"
+                    # alone would let a brief read as tradeable at 04:00.
+                    mode=mode if market else "CLOSED", db_path=self.db_path,
                 )
             except Exception as exc:  # noqa: BLE001 - a brief must not break a snapshot
                 logger.warning("Thesis failed for %s: %s",

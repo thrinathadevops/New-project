@@ -1740,3 +1740,18 @@ table.data td { border-bottom: 1px solid var(--border); }
   .thesis__meter { text-align: left; }
   .tabs { overflow-x: auto; }
 }
+
+/* ------------------------------------------- exact quote inside the ticket - */
+.ticket__verdict {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  margin-top: 14px; padding: 11px 13px;
+  border: 1px solid var(--border); border-left: 3px solid var(--text-muted);
+  background: var(--surface-2);
+}
+.ticket__verdict.thesis--good   { border-left-color: var(--good); }
+.ticket__verdict.thesis--warn   { border-left-color: var(--warning); }
+.ticket__verdict.thesis--danger { border-left-color: var(--critical); }
+.ticket__verdict .field__hint { margin: 0 0 0 auto; }
+.checks--compact { margin-top: 0; border-top: 0; font-size: 13px; }
+.checks--compact .check { grid-template-columns: 20px 150px 1fr; padding: 7px 0; }
+.checks--compact .check--blocker { margin: 0 -13px; padding-left: 13px; padding-right: 13px; }

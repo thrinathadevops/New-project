@@ -1170,6 +1170,8 @@ function renderPositions(snapshot) {
         <td style="color:var(--text-primary);font-weight:600">
           ${escapeHtml(position.index_name)} ${position.strike}
           ${escapeHtml(position.option_type)}
+          ${position.expiry ? `<span class="field__hint" style="display:block;font-weight:400">${
+            escapeHtml(position.expiry)}</span>` : ''}
         </td>
         <td class="num">${position.lots}×${position.lot_size}</td>
         <td class="num">₹${position.entry_premium.toFixed(2)}</td>
@@ -2353,6 +2355,7 @@ function connect() {
       return;
     }
     if (payload.type === 'snapshot') applySnapshot(payload);
+    else if (payload.type === 'quote') applyQuote(payload);
     else if (payload.type === 'ticks') applyTicks(payload);
     else if (payload.type === 'ack' && payload.message) {
       showToast({ kind: 'SIGNAL_NEW', severity: 'good', title: payload.title
@@ -2776,6 +2779,7 @@ function ticketLeg() {
     targetPct: Number($('ticket-target').value) / 100,
     stopPct: Number($('ticket-stop').value) / 100,
     token: null, signalId: ticket.signalId,
+    expiry: (signal && signal.expiry) || null,
   };
 }
 
@@ -2824,6 +2828,7 @@ function renderTicketMath() {
     ${rr < 1 ? '<p class="ticket__warn">After costs you would be risking more than you can win.</p>' : ''}`;
   renderTicketBrief(leg);
   renderBasket();
+  requestQuote(leg);
 }
 
 /** The engine's brief applies to the contract it named. For any other strike
@@ -2952,7 +2957,7 @@ function placeLeg(leg) {
     index_name: leg.index, option_type: leg.side, strike: leg.strike,
     lot_size: leg.lotSize, lots: leg.lots, entry_premium: leg.premium,
     target_pct: leg.targetPct, stop_pct: leg.stopPct,
-    option_token: leg.token, signal_id: leg.signalId,
+    option_token: leg.token, signal_id: leg.signalId, expiry: leg.expiry,
   });
 }
 
@@ -2995,4 +3000,83 @@ function wireTicket() {
     ticket.basket = [];
     close();
   });
+}
+
+
+// ============================================================== exact quote ==
+
+/** What the ticket shows first is a local estimate so it responds as you type.
+ *  The server then replaces it with the real figures -- the fitted cost model,
+ *  the measured spread, this contract's own delta, and the full set of checks
+ *  run on THIS leg rather than borrowed from the engine's contract. */
+let quoteTimer = null;
+let quoteSeq = 0;
+
+function requestQuote(leg) {
+  clearTimeout(quoteTimer);
+  if (!legValid(leg)) return;
+  const id = ++quoteSeq;
+  quoteTimer = setTimeout(() => send({
+    type: 'quote', id,
+    index_name: leg.index, option_type: leg.side, strike: leg.strike,
+    entry_premium: leg.premium, lots: leg.lots,
+    target_pct: leg.targetPct, stop_pct: leg.stopPct,
+  }), 220);
+}
+
+function applyQuote(quote) {
+  // A reply to an older keystroke must not overwrite a newer one.
+  if (quote.id !== quoteSeq || !$('ticket').open) return;
+  if (quote.error || !quote.plan) {
+    if (quote.error) {
+      $('ticket-brief').innerHTML =
+        `<p class="ticket__warn">${escapeHtml(quote.error)}</p>`;
+    }
+    return;
+  }
+  const plan = quote.plan;
+  const share = (plan.risk_pct_of_capital || 0) * 100;
+  const risk = plan.stop_protects_gain
+    ? `<div><span>Stop ₹${quote.stop_premium.toFixed(2)} locks in</span>
+         <b class="pos">${rupees(plan.locked_gain, { sign: true })}</b></div>`
+    : `<div><span>Stop ₹${quote.stop_premium.toFixed(2)}</span>
+         <b class="neg">${rupees(-plan.risk_amount, { sign: true })}</b></div>`;
+  $('ticket-math').innerHTML = `
+    <div class="math-grid">
+      <div><span>Quantity</span><b>${plan.quantity}</b></div>
+      <div><span>Capital needed</span><b>${rupees(plan.deployed_capital)}</b></div>
+      <div><span>Target ₹${quote.target_premium.toFixed(2)}</span>
+        <b class="pos">${rupees(plan.reward_amount, { sign: true })}</b></div>
+      ${risk}
+      <div><span>Reward : risk, after costs</span><b class="${
+        plan.net_rr < 1 && !plan.stop_protects_gain ? 'neg' : ''}">${
+        plan.stop_protects_gain ? 'n/a' : plan.net_rr.toFixed(2)}</b></div>
+      <div><span>Loss as % of capital</span><b class="${share >= 10 ? 'neg' : ''}">${
+        share.toFixed(1)}%</b></div>
+      <div><span>Round-trip cost</span><b>${rupees(plan.round_trip_cost)}</b></div>
+      <div><span>Breakeven premium</span><b>₹${plan.breakeven.toFixed(2)}</b></div>
+      <div><span>Costs as % of position</span><b>${
+        ((plan.cost_drag || 0) * 100).toFixed(2)}%</b></div>
+    </div>
+    <p class="field__hint" style="margin-top:8px">Exact figures from the cost
+      model — brokerage, statutory charges and the measured spread.</p>`;
+
+  const t = quote.thesis || {};
+  const notes = (quote.notes || []).map(
+    (n) => `<p class="ticket__read">${escapeHtml(n)}</p>`).join('');
+  const checks = (t.checks || []).map((c) => `
+    <li class="check check--${escapeHtml(c.state)}${c.blocker ? ' check--blocker' : ''}">
+      <span class="check__icon" aria-hidden="true">${CHECK_ICON[c.state] || '•'}</span>
+      <span class="check__label">${escapeHtml(c.label)}</span>
+      <span class="check__detail">${escapeHtml(c.detail)}</span>
+    </li>`).join('');
+  $('ticket-brief').innerHTML = `
+    ${notes}
+    <div class="ticket__verdict thesis--${escapeHtml(t.tone || 'neutral')}">
+      <span class="thesis__verdict">${escapeHtml(t.verdict || '')}</span>
+      <b>${escapeHtml(t.headline || '')}</b>
+      ${t.agreement === null || t.agreement === undefined ? ''
+        : `<span class="field__hint">${t.agreement}% of checks support it</span>`}
+    </div>
+    ${checks ? `<ul class="checks checks--compact">${checks}</ul>` : ''}`;
 }

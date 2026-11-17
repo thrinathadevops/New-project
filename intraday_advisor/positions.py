@@ -40,6 +40,9 @@ class LivePosition:
     opened_at: str
     option_token: str | None = None
     signal_id: str | None = None
+    #: The contract's expiry label (e.g. ``24NOV2026``), or "" for positions
+    #: recorded before it was stored.
+    expiry: str = ""
     #: Free text stored with the position. The paper desk puts the agent's
     #: stance here so a day's P&L can be split by PROCEED / CAUTION / VETO.
     #: It was missing from this dataclass while being written to the database,
@@ -78,6 +81,7 @@ def open_position(
     option_token: str | None = None,
     signal_id: str | None = None,
     notes: str | None = None,
+    expiry: str | None = None,
     db_path: str | Path = DEFAULT_LEDGER_PATH,
 ) -> str:
     """Record a position you have taken. Returns its id."""
@@ -95,14 +99,15 @@ def open_position(
             INSERT INTO positions (
                 position_id, opened_at, session_date, index_name, option_type,
                 strike, lot_size, lots, entry_premium, target_pct, stop_pct,
-                option_token, signal_id, status, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                option_token, signal_id, status, notes, expiry
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
             """,
             (
                 position_id, opened.isoformat(timespec="seconds"),
                 opened.date().isoformat(), index_name.upper(), option_type.upper(),
                 float(strike), int(lot_size), int(lots), float(entry_premium),
                 float(target_pct), float(stop_pct), option_token, signal_id, notes,
+                (expiry or "").upper() or None,
             ),
         )
     return position_id
@@ -182,6 +187,7 @@ def load_open_positions(
             option_token=row["option_token"],
             signal_id=row["signal_id"],
             notes=row["notes"] or "",
+            expiry=(row["expiry"] if "expiry" in row.keys() else "") or "",
             deployed=round(entry * lot_size * lots, 2),
         ))
     return out

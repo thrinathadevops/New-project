@@ -336,6 +336,44 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
         broadcaster.request_refresh()
         return
 
+    if kind == "quote":
+        # Exact costs, sizing and a brief for whatever leg is in the ticket.
+        # Read-only: it prices an order, it never places one.
+        reply: dict = {"type": "quote", "id": message.get("id")}
+        try:
+            from intraday_advisor.thesis import quote_leg
+
+            snapshot = broadcaster.latest or {}
+            engine = broadcaster.engine
+            signal = next(
+                (s for s in snapshot.get("signals", [])
+                 if s.get("index") == message.get("index_name")), None)
+            if signal is None:
+                reply["error"] = "No market snapshot for that index yet."
+            else:
+                reply.update(await asyncio.to_thread(
+                    quote_leg, signal,
+                    strike=float(message["strike"]),
+                    option_type=str(message["option_type"]),
+                    premium=float(message["entry_premium"]),
+                    lots=int(message.get("lots", 1)),
+                    target_pct=float(message.get("target_pct", 0.25)),
+                    stop_pct=float(message.get("stop_pct", 0.20)),
+                    available_capital=engine.available_capital,
+                    costs=getattr(engine, "_costs", None),
+                    event_risk=snapshot.get("event_risk"),
+                    performance=(snapshot.get("ledger") or {}).get("performance"),
+                    minutes_to_square_off=snapshot.get("minutes_to_square_off"),
+                    mode=(snapshot.get("mode", "") if snapshot.get("market_open")
+                          else "CLOSED"),
+                    db_path=engine.db_path,
+                ))
+        except (KeyError, ValueError, TypeError) as exc:
+            reply["error"] = f"Could not price this order: {exc}"
+        from intraday_advisor.engine import json_safe
+        await socket.send(json.dumps(json_safe(reply)))
+        return
+
     if kind == "open_position":
         try:
             position_id = await asyncio.to_thread(
@@ -350,6 +388,7 @@ async def handle_command(message: dict, broadcaster: Broadcaster, socket) -> Non
                 stop_pct=float(message.get("stop_pct", 0.20)),
                 option_token=message.get("option_token"),
                 signal_id=message.get("signal_id"),
+                expiry=message.get("expiry"),
                 db_path=broadcaster.engine.db_path,
             )
         except (KeyError, ValueError, TypeError) as exc:
